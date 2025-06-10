@@ -27,8 +27,16 @@ install_realm() {
     fi
 
     mkdir -p /etc/realm
-    curl -Lo /usr/local/bin/realm "$REALM_URL"
+    curl -L --fail -o /usr/local/bin/realm "$REALM_URL"
     chmod +x /usr/local/bin/realm
+
+    # 校验是否可执行
+    if ! file /usr/local/bin/realm | grep -q "executable"; then
+        echo -e "${RED}下载的 realm 不是可执行文件，可能被 GitHub 重定向了。${RESET}"
+        rm -f /usr/local/bin/realm
+        read -rp "按回车返回菜单..." _
+        return
+    fi
 
     cat > /etc/realm/config.json <<EOF
 {
