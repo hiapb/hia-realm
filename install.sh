@@ -1,23 +1,37 @@
 #!/bin/bash
 GREEN="\e[32m"
-RED="\e[31m"
 YELLOW="\e[33m"
+RED="\e[31m"
 RESET="\e[0m"
 
 REALM_BIN="/usr/local/bin/realm"
 REALM_CFG="/etc/realm/config.toml"
 REALM_SERVICE="realm"
 
-if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}请以 root 用户运行此脚本。${RESET}"
-    exit 1
-fi
+install_dependencies() {
+    echo -e "${GREEN}正在检测并安装所需依赖...${RESET}"
+
+    if ! command -v jq >/dev/null; then
+        echo -e "${YELLOW}未检测到 jq，正在安装...${RESET}"
+        apt update && apt install -y jq
+    fi
+
+    if ! command -v toml2json >/dev/null || ! command -v json2toml >/dev/null; then
+        if ! command -v npm >/dev/null; then
+            echo -e "${YELLOW}未检测到 npm，正在安装 Node.js/npm...${RESET}"
+            apt install -y nodejs npm
+        fi
+        echo -e "${YELLOW}正在安装 toml2json/json2toml...${RESET}"
+        npm install -g toml2json json2toml
+    fi
+}
 
 install_realm() {
     echo -e "${GREEN}正在安装 Realm TCP+UDP万能转发（zhboner/realm）...${RESET}"
+
     ARCH=$(uname -m)
     case "$ARCH" in
-        x86_64)  ARCH_NAME="x86_64-unknown-linux-gnu" ;;
+        x86_64) ARCH_NAME="x86_64-unknown-linux-gnu" ;;
         aarch64) ARCH_NAME="aarch64-unknown-linux-gnu" ;;
         *) echo -e "${RED}不支持的架构: $ARCH${RESET}"; return ;;
     esac
@@ -30,20 +44,24 @@ install_realm() {
 
     TMP_DIR=$(mktemp -d)
     DOWNLOAD_URL="https://github.com/zhboner/realm/releases/download/${LATEST_VERSION}/realm-${ARCH_NAME}.tar.gz"
+    echo -e "${GREEN}下载版本: ${YELLOW}${LATEST_VERSION}${RESET}"
     echo -e "${GREEN}正在下载: ${DOWNLOAD_URL}${RESET}"
+
     curl -L --fail -o "$TMP_DIR/realm.tar.gz" "$DOWNLOAD_URL" || {
         echo -e "${RED}下载失败，请检查网络。${RESET}"
         return
     }
 
     tar -xzf "$TMP_DIR/realm.tar.gz" -C "$TMP_DIR"
-    install -m 755 "$TMP_DIR/realm" /usr/local/bin/realm
+    install -m 755 "$TMP_DIR/realm" "$REALM_BIN"
     rm -rf "$TMP_DIR"
 
     mkdir -p /etc/realm
     cat > "$REALM_CFG" <<EOF
 [general]
 log-level = "info"
+
+endpoints = []
 EOF
 
     cat > /etc/systemd/system/realm.service <<EOF
@@ -52,7 +70,7 @@ Description=Realm Proxy Service
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/realm -c /etc/realm/config.toml
+ExecStart=$REALM_BIN -c $REALM_CFG
 Restart=on-failure
 
 [Install]
@@ -61,15 +79,15 @@ EOF
 
     systemctl daemon-reload
     systemctl enable realm
-    systemctl start realm
+    systemctl restart realm
 
-    echo -e "${GREEN}Realm 安装并启动完成！${RESET}"
+    echo -e "${GREEN}Realm 安装并启动完成！配置文件已初始化。${RESET}"
 }
 
 uninstall_realm() {
     systemctl stop realm
     systemctl disable realm
-    rm -f /usr/local/bin/realm
+    rm -f "$REALM_BIN"
     rm -f /etc/systemd/system/realm.service
     rm -rf /etc/realm
     systemctl daemon-reload
@@ -84,73 +102,34 @@ restart_realm() {
 add_realm_rule() {
     read -p "请输入本机监听端口: " LISTEN_PORT
     read -p "请输入目标 IP:PORT: " TARGET_ADDR
-
-    cat >> "$REALM_CFG" <<EOF
-
-[[endpoints]]
-listen = "0.0.0.0:${LISTEN_PORT}"
-remote = "${TARGET_ADDR}"
-type = "tcp"
-EOF
-
-    systemctl restart realm
-    echo -e "${GREEN}转发规则已添加并应用！${RESET}"
+    RULE=$(cat "$REALM_CFG" | toml2json)
+    NEW_RULE=$(echo "$RULE" | jq ".endpoints += [{\"listen\": \"0.0.0.0:$LISTEN_PORT\", \"remote\": \"$TARGET_ADDR\", \"type\": \"tcp+udp\"}]")
+    echo "$NEW_RULE" | json2toml > "$REALM_CFG"
+    restart_realm
+    echo -e "${GREEN}已添加并应用规则。${RESET}"
 }
 
 list_realm_rules() {
-    echo -e "${GREEN}当前 Realm 转发规则：${RESET}"
-    grep -A 3 '^\[\[endpoints\]\]' "$REALM_CFG"
+    echo -e "${GREEN}当前规则：${RESET}"
+    cat "$REALM_CFG" | toml2json | jq -c '.endpoints[]' | nl
 }
 
 delete_realm_rule() {
-    echo -e "${GREEN}当前转发规则：${RESET}"
-    RULES=()
-    INDEX=0
-    BLOCK=""
-    while IFS= read -r line || [[ -n $line ]]; do
-        if [[ "$line" =~ \[\[endpoints\]\] ]]; then
-            [[ -n "$BLOCK" ]] && RULES+=("$BLOCK")
-            BLOCK="$line"$'\n'
-        else
-            BLOCK+="$line"$'\n'
-        fi
-    done < "$REALM_CFG"
-    [[ -n "$BLOCK" ]] && RULES+=("$BLOCK")
-
-    if [[ ${#RULES[@]} -eq 0 ]]; then
-        echo -e "${RED}无规则可删除。${RESET}"
-        return
-    fi
-
-    for i in "${!RULES[@]}"; do
-        echo -e "${YELLOW}$((i+1)):${RESET}"
-        echo "${RULES[$i]}"
-        echo "----------------------"
-    done
-
+    list_realm_rules
     read -p "请输入要删除的规则编号: " DEL_NO
-    if ! [[ "$DEL_NO" =~ ^[0-9]+$ ]] || (( DEL_NO < 1 || DEL_NO > ${#RULES[@]} )); then
-        echo -e "${RED}编号无效。${RESET}"
-        return
-    fi
-
-    echo "[general]
-log-level = \"info\"" > "$REALM_CFG"
-    for i in "${!RULES[@]}"; do
-        if (( i+1 != DEL_NO )); then
-            echo "${RULES[$i]}" >> "$REALM_CFG"
-        fi
-    done
-
-    systemctl restart realm
-    echo -e "${GREEN}已删除规则 #${DEL_NO} 并重启 Realm。${RESET}"
+    RULE=$(cat "$REALM_CFG" | toml2json)
+    NEW_RULE=$(echo "$RULE" | jq "del(.endpoints[$((DEL_NO-1))])")
+    echo "$NEW_RULE" | json2toml > "$REALM_CFG"
+    restart_realm
+    echo -e "${GREEN}规则已删除。${RESET}"
 }
 
 delete_all_realm_rules() {
-    echo "[general]
-log-level = \"info\"" > "$REALM_CFG"
-    systemctl restart realm
-    echo -e "${GREEN}全部转发规则已清空。${RESET}"
+    RULE=$(cat "$REALM_CFG" | toml2json)
+    NEW_RULE=$(echo "$RULE" | jq ".endpoints = []")
+    echo "$NEW_RULE" | json2toml > "$REALM_CFG"
+    restart_realm
+    echo -e "${GREEN}所有规则已清空。${RESET}"
 }
 
 view_realm_log() {
@@ -187,9 +166,11 @@ main_menu() {
             8) view_realm_log ;;
             9) view_realm_config ;;
             10) exit 0 ;;
-            *) echo -e "${RED}请输入正确的选项！${RESET}" ;;
+            *) echo -e "${RED}无效选项，请重新选择。${RESET}" ;;
         esac
+        echo
     done
 }
 
+install_dependencies
 main_menu
