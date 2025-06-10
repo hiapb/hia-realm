@@ -12,22 +12,37 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 install_realm() {
+    clear
+    echo -e "${GREEN}正在安装 Realm TCP+UDP万能转发脚本...${RESET}"
+
+    ARCH=$(uname -m)
+    if [[ $ARCH == "x86_64" ]]; then
+        REALM_URL="https://github.com/zhxie/realm/releases/latest/download/realm-linux-amd64"
+    elif [[ $ARCH == "aarch64" ]]; then
+        REALM_URL="https://github.com/zhxie/realm/releases/latest/download/realm-linux-arm64"
+    else
+        echo -e "${RED}不支持的架构: $ARCH${RESET}"
+        exit 1
+    fi
+
     mkdir -p /etc/realm
-    curl -Lo $REALM_BIN https://github.com/zhxie/realm/releases/latest/download/realm-linux-amd64
-    chmod +x $REALM_BIN
-    cat > "$REALM_CFG" <<EOF
+    curl -Lo /usr/local/bin/realm "$REALM_URL"
+    chmod +x /usr/local/bin/realm
+
+    cat > /etc/realm/config.json <<EOF
 {
   "log-level": "info",
   "listen": []
 }
 EOF
+
     cat > /etc/systemd/system/realm.service <<EOF
 [Unit]
 Description=Realm Proxy Service
 After=network.target
 
 [Service]
-ExecStart=$REALM_BIN -c $REALM_CFG
+ExecStart=/usr/local/bin/realm -c /etc/realm/config.json
 Restart=on-failure
 
 [Install]
@@ -38,6 +53,8 @@ EOF
     systemctl enable realm
     systemctl start realm
     echo -e "${GREEN}Realm 安装并启动成功。${RESET}"
+    sleep 2
+    exit 0
 }
 
 uninstall_realm() {
