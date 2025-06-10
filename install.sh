@@ -1,40 +1,34 @@
 #!/bin/bash
-
 GREEN="\e[32m"
-YELLOW="\e[33m"
-RED="\e[31m"
-PLAIN="\e[0m"
+RESET="\e[0m"
 
-CONFIG_FILE="/etc/realm/config.toml"
-SERVICE_NAME="realm"
 REALM_BIN="/usr/local/bin/realm"
+REALM_CFG="/etc/realm/config.toml"
+REALM_SERVICE="realm"
+REALM_SYSTEMD="/etc/systemd/system/realm.service"
+REALM_URL="https://github.com/zhboner/realm/releases/download/v2.7.0/realm-x86_64-unknown-linux-musl.tar.gz"
 
 check_root() {
     if [ "$EUID" -ne 0 ]; then
-        echo -e "${RED}请以 root 权限运行此脚本。${PLAIN}"
+        echo -e "${GREEN}请以 root 用户运行此脚本。${RESET}"
         exit 1
     fi
 }
 
 install_realm() {
-    echo -e "${GREEN}正在安装 Realm TCP+UDP转发脚本...${PLAIN}"
-    LATEST_VERSION=$(curl -s https://api.github.com/repos/zhboner/realm/releases/latest | grep tag_name | cut -d '"' -f4)
-    ARCH="x86_64-unknown-linux-musl"
-    DOWNLOAD_URL="https://github.com/zhboner/realm/releases/download/${LATEST_VERSION}/realm-${ARCH}.tar.gz"
-    
-    mkdir -p /tmp/realm && cd /tmp/realm
-    curl -L -o realm.tar.gz "$DOWNLOAD_URL"
-    tar -xzvf realm.tar.gz
-    mv realm "$REALM_BIN"
-    chmod +x "$REALM_BIN"
+    mkdir -p /tmp/realm-install && cd /tmp/realm-install
+    echo -e "${GREEN}正在下载 Realm...${RESET}"
+    curl -L "$REALM_URL" -o realm.tar.gz
+    tar -xzf realm.tar.gz
+    install -m 755 realm -t /usr/local/bin
 
-    cat > /etc/systemd/system/realm.service <<EOF
+    cat > "$REALM_SYSTEMD" <<EOF
 [Unit]
 Description=Realm Proxy
 After=network.target
 
 [Service]
-ExecStart=$REALM_BIN -c $CONFIG_FILE
+ExecStart=/usr/local/bin/realm -c /etc/realm/config.toml
 Restart=always
 LimitNOFILE=1048576
 
@@ -43,87 +37,85 @@ WantedBy=multi-user.target
 EOF
 
     mkdir -p /etc/realm
-    touch "$CONFIG_FILE"
-
-    systemctl daemon-reload
+    echo "# Realm Config" > "$REALM_CFG"
+    systemctl daemon-reexec
     systemctl enable realm
     systemctl start realm
-
-    echo -e "${GREEN}Realm 安装完成。${PLAIN}"
+    echo -e "${GREEN}Realm 安装完成。${RESET}"
 }
 
 uninstall_realm() {
     systemctl stop realm
     systemctl disable realm
-    rm -f "$REALM_BIN" /etc/systemd/system/realm.service "$CONFIG_FILE"
-    systemctl daemon-reload
-    echo -e "${GREEN}Realm 卸载完成。${PLAIN}"
+    rm -f "$REALM_BIN" "$REALM_CFG" "$REALM_SYSTEMD"
+    systemctl daemon-reexec
+    echo -e "${GREEN}Realm 已卸载。${RESET}"
 }
 
 restart_realm() {
     systemctl restart realm
-    echo -e "${GREEN}Realm 已重启。${PLAIN}"
+    echo -e "${GREEN}Realm 已重启。${RESET}"
 }
 
-add_forward_rule() {
-    read -p "请输入本机监听端口: " LPORT
-    read -p "请输入目标 IP:PORT: " RADDR
-    echo -e "[[endpoints]]\nlisten = \"0.0.0.0:${LPORT}\"\nremote = \"${RADDR}\"\ntype = \"tcp+udp\"\n" >> "$CONFIG_FILE"
+add_realm_rule() {
+    read -p "请输入本机监听端口: " LISTEN_PORT
+    read -p "请输入目标 IP:PORT: " TARGET_ADDR
+    cat >> "$REALM_CFG" <<EOF
+[[endpoints]]
+listen = "0.0.0.0:$LISTEN_PORT"
+remote = "$TARGET_ADDR"
+type = "tcp+udp"
+EOF
     restart_realm
-    echo -e "${GREEN}已添加并应用规则。${PLAIN}"
+    echo -e "${GREEN}已添加并应用规则。${RESET}"
 }
 
 delete_single_rule() {
-    RULES=($(grep -n 'listen = ' "$CONFIG_FILE" | cut -d: -f1))
-    if [ ${#RULES[@]} -eq 0 ]; then
-        echo -e "${YELLOW}没有规则可删除。${PLAIN}"
-        return
-    fi
-    echo -e "${GREEN}当前转发规则：${PLAIN}"
-    INDEX=1
-    for i in "${RULES[@]}"; do
-        sed -n "$i,+2p" "$CONFIG_FILE"
+    echo -e "${GREEN}当前转发规则：${RESET}"
+    RULES=($(grep -n '^\[\[endpoints\]\]' "$REALM_CFG" | cut -d: -f1))
+    TOTAL=${#RULES[@]}
+    for ((i=0; i<TOTAL; i++)); do
+        START=${RULES[$i]}
+        END=$(( (i+1 < TOTAL) ? ${RULES[$((i+1))]}-1 : $(wc -l < "$REALM_CFG") ))
+        sed -n "$START,${END}p" "$REALM_CFG" | nl -v 1
         echo "---"
-        INDEX=$((INDEX+1))
     done
-    read -p "请输入要删除的规则编号: " NO
-    LINE=${RULES[$((NO-1))]}
-    if [ -z "$LINE" ]; then
-        echo -e "${RED}编号无效。${PLAIN}"
-        return
-    fi
-    sed -i "$LINE,+3d" "$CONFIG_FILE"
+    read -p "请输入要删除的规则编号: " RULE_NO
+    IDX=$((RULE_NO-1))
+    START=${RULES[$IDX]}
+    END=$(( (IDX+1 < TOTAL) ? ${RULES[$((IDX+1))]}-1 : $(wc -l < "$REALM_CFG") ))
+    sed -i "${START},${END}d" "$REALM_CFG"
     restart_realm
-    echo -e "${GREEN}规则已删除。${PLAIN}"
+    echo -e "${GREEN}规则已删除并重启 Realm。${RESET}"
 }
 
 delete_all_rules() {
-    > "$CONFIG_FILE"
+    sed -i '/\[\[endpoints\]\]/,/^$/d' "$REALM_CFG"
     restart_realm
-    echo -e "${GREEN}已删除所有规则。${PLAIN}"
+    echo -e "${GREEN}已删除所有规则。${RESET}"
 }
 
-view_rules() {
-    echo -e "${GREEN}当前转发规则：${PLAIN}"
-    if [ ! -s "$CONFIG_FILE" ]; then
-        echo "无规则。"
-    else
-        cat "$CONFIG_FILE"
-    fi
+list_realm_rules() {
+    echo -e "${GREEN}当前转发规则：${RESET}"
+    grep -A 2 '^\[\[endpoints\]\]' "$REALM_CFG" | sed '/^--$/d'
 }
 
 view_log() {
-    journalctl -u realm --no-pager --since "1 hour ago"
+    journalctl -u realm --no-pager -n 30
 }
 
 view_config() {
-    echo -e "${GREEN}当前配置文件内容：${PLAIN}"
-    cat "$CONFIG_FILE"
+    cat "$REALM_CFG"
 }
 
-menu() {
+exit_script() {
+    echo -e "${GREEN}已退出 Realm 管理脚本。${RESET}"
+    exit 0
+}
+
+main_menu() {
     while true; do
-        echo -e "${GREEN}===== Realm TCP+UDP 转发脚本 =====${PLAIN}"
+        echo -e "${GREEN}===== Realm TCP+UDP 转发脚本 =====${RESET}"
         echo "1. 安装 Realm"
         echo "2. 卸载 Realm"
         echo "3. 重启 Realm"
@@ -135,22 +127,22 @@ menu() {
         echo "8. 查看日志"
         echo "9. 查看配置"
         echo "0. 退出"
-        read -rp "请选择一个操作 [0-9]: " CHOICE
+        read -p "请选择一个操作 [0-9]: " CHOICE
         case "$CHOICE" in
-            1) install_realm;;
-            2) uninstall_realm;;
-            3) restart_realm;;
-            4) add_forward_rule;;
-            5) delete_single_rule;;
-            6) delete_all_rules;;
-            7) view_rules;;
-            8) view_log;;
-            9) view_config;;
-            0) exit 0;;
-            *) echo -e "${RED}无效选项，请重新输入。${PLAIN}";;
+            1) install_realm ;;
+            2) uninstall_realm ;;
+            3) restart_realm ;;
+            4) add_realm_rule ;;
+            5) delete_single_rule ;;
+            6) delete_all_rules ;;
+            7) list_realm_rules ;;
+            8) view_log ;;
+            9) view_config ;;
+            0) exit_script ;;
+            *) echo -e "${GREEN}请输入正确的选项！${RESET}" ;;
         esac
     done
 }
 
 check_root
-menu
+main_menu
