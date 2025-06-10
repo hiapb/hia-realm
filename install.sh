@@ -28,14 +28,13 @@ install_realm() {
         return
     fi
 
-    echo -e "${GREEN}下载版本: ${YELLOW}${LATEST_VERSION}${RESET}"
-
     TMP_DIR=$(mktemp -d)
     DOWNLOAD_URL="https://github.com/zhboner/realm/releases/download/${LATEST_VERSION}/realm-${ARCH_NAME}.tar.gz"
+    echo -e "${GREEN}下载版本: ${YELLOW}${LATEST_VERSION}${RESET}"
+    echo -e "${GREEN}正在下载: ${DOWNLOAD_URL}${RESET}"
 
-    echo -e "${GREEN}正在下载 ${DOWNLOAD_URL}${RESET}"
     curl -L --fail -o "$TMP_DIR/realm.tar.gz" "$DOWNLOAD_URL" || {
-        echo -e "${RED}下载失败，请检查网络或 GitHub 可达性。${RESET}"
+        echo -e "${RED}下载失败，请检查网络。${RESET}"
         read -rp "按回车返回菜单..." _
         return
     }
@@ -45,11 +44,14 @@ install_realm() {
     rm -rf "$TMP_DIR"
 
     mkdir -p /etc/realm
-    cat > /etc/realm/config.json <<EOF
-{
-  "log-level": "info",
-  "listen": []
-}
+    cat > /etc/realm/config.toml <<EOF
+[general]
+log-level = "info"
+
+[[endpoints]]
+listen = "0.0.0.0:12345"
+remote = "1.1.1.1:443"
+type = "tcp"
 EOF
 
     cat > /etc/systemd/system/realm.service <<EOF
@@ -58,7 +60,7 @@ Description=Realm Proxy Service
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/realm -c /etc/realm/config.json
+ExecStart=/usr/local/bin/realm -c /etc/realm/config.toml
 Restart=on-failure
 
 [Install]
@@ -69,15 +71,7 @@ EOF
     systemctl enable realm
     systemctl start realm
 
-    echo -e "${GREEN}Realm 安装并启动完成！${RESET}"
-}
-
-uninstall_realm() {
-    systemctl stop realm
-    systemctl disable realm
-    rm -f $REALM_BIN $REALM_CFG /etc/systemd/system/realm.service
-    systemctl daemon-reload
-    echo -e "${GREEN}Realm 已卸载。${RESET}"
+    echo -e "${GREEN}Realm 安装并启动完成！默认监听 0.0.0.0:12345${RESET}"
 }
 
 restart_realm() {
