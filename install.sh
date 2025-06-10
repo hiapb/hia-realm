@@ -1,35 +1,36 @@
 #!/bin/bash
-GREEN="\e[32m"
-RESET="\e[0m"
 REALM_BIN="/usr/local/bin/realm"
-REALM_CFG="/etc/realm/config.toml"
-REALM_SERVICE="/etc/systemd/system/realm.service"
-
-ARCH=$(uname -m)
-case "$ARCH" in
-    x86_64) ARCH_NAME="x86_64-unknown-linux-musl" ;;
-    aarch64) ARCH_NAME="aarch64-unknown-linux-musl" ;;
-    *) echo "不支持架构 $ARCH"; exit 1 ;;
-esac
+CONFIG_FILE="/etc/realm/config.toml"
+SERVICE_FILE="/etc/systemd/system/realm.service"
+ARCH="x86_64-unknown-linux-musl"
 
 install_realm() {
-    VERSION=$(curl -s https://api.github.com/repos/zhboner/realm/releases/latest | grep tag_name | cut -d '"' -f4)
-    URL="https://github.com/zhboner/realm/releases/download/${VERSION}/realm-${ARCH_NAME}.tar.gz"
-    TMP_DIR=$(mktemp -d)
-    curl -L "$URL" -o "$TMP_DIR/realm.tar.gz"
-    tar -xzf "$TMP_DIR/realm.tar.gz" -C "$TMP_DIR"
-    install -m 755 "$TMP_DIR/realm" "$REALM_BIN"
-    rm -rf "$TMP_DIR"
-    mkdir -p /etc/realm
-    echo "# Realm Config" > "$REALM_CFG"
+    echo "正在安装 Realm TCP+UDP万能转发脚本..."
+    mkdir -p /tmp/realm
+    cd /tmp/realm || exit 1
+    LATEST_VERSION=$(curl -s https://github.com/zhboner/realm/releases/latest | grep "/tag/" | cut -d'"' -f2 | awk -F/ '{print $NF}')
+    if [ -z "$LATEST_VERSION" ]; then
+        echo "获取最新版本失败。"
+        return
+    fi
+    echo "正在下载: https://github.com/zhboner/realm/releases/download/${LATEST_VERSION}/realm-${ARCH}.tar.gz"
+    curl -L -o realm.tar.gz "https://github.com/zhboner/realm/releases/download/${LATEST_VERSION}/realm-${ARCH}.tar.gz"
+    tar -xzf realm.tar.gz
+    mv realm "$REALM_BIN"
+    chmod +x "$REALM_BIN"
 
-    cat > "$REALM_SERVICE" <<EOF
+    mkdir -p /etc/realm
+    cat > "$CONFIG_FILE" <<EOF
+endpoints = []
+EOF
+
+    cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Realm Proxy
 After=network.target
 
 [Service]
-ExecStart=$REALM_BIN -c $REALM_CFG
+ExecStart=$REALM_BIN -c $CONFIG_FILE
 Restart=always
 LimitNOFILE=1048576
 
@@ -37,71 +38,89 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 EOF
 
+    systemctl daemon-reexec
     systemctl daemon-reload
     systemctl enable realm
-    systemctl start realm
-    echo -e "${GREEN}Realm 安装完成。${RESET}"
+    systemctl restart realm
+
+    echo "Realm 安装完成。"
 }
 
 uninstall_realm() {
     systemctl stop realm
     systemctl disable realm
-    rm -f "$REALM_BIN" "$REALM_SERVICE"
-    rm -rf /etc/realm
+    rm -f "$REALM_BIN" "$CONFIG_FILE" "$SERVICE_FILE"
     systemctl daemon-reload
-    echo -e "${GREEN}Realm 已卸载。${RESET}"
+    echo "Realm 已卸载。"
 }
 
 restart_realm() {
     systemctl restart realm
+    echo "Realm 已重启。"
 }
 
 add_rule() {
-    read -p "请输入本机监听端口: " LPORT
-    read -p "请输入目标 IP:PORT: " RADDR
+    read -rp "监听端口: " port
+    read -rp "目标地址 (IP:PORT): " target
+    read -rp "协议 (tcp/udp): " proto
+    read -rp "名称（可选，默认 endpoint-$port）: " name
+    [[ -z "$name" ]] && name="endpoint-$port"
 
-    cat >> "$REALM_CFG" <<EOF
-
-[[endpoints]]
-listen = "0.0.0.0:$LPORT"
-remote = "$RADDR"
-type = "tcp+udp"
-EOF
-
+    tmp=$(mktemp)
+    echo 'endpoints = [' > "$tmp"
+    grep '^{' "$CONFIG_FILE" >> "$tmp" 2>/dev/null
+    echo "{ name = \"$name\", listen = \":$port\", remote = \"$target\", type = \"$proto\" }" >> "$tmp"
+    echo ']' >> "$tmp"
+    mv "$tmp" "$CONFIG_FILE"
     restart_realm
-    echo -e "${GREEN}已添加规则: $LPORT -> $RADDR${RESET}"
-}
-
-list_rules() {
-    echo -e "${GREEN}当前转发规则：${RESET}"
-    grep -A 3 '\[\[endpoints\]\]' "$REALM_CFG" | nl
+    echo "已添加规则: $name"
 }
 
 delete_rule() {
-    list_rules
-    read -p "请输入要删除的规则编号: " LINE_NO
-    sed -i "$(( (LINE_NO - 1) * 5 + 1 )),$(( (LINE_NO - 1) * 5 + 4 ))d" "$REALM_CFG"
+    echo "当前规则："
+    grep 'name = ' "$CONFIG_FILE" | nl
+    read -rp "输入要删除的编号: " idx
+    tmp=$(mktemp)
+    count=0
+    echo 'endpoints = [' > "$tmp"
+    while IFS= read -r line; do
+        if [[ "$line" =~ name\ = ]]; then
+            count=$((count+1))
+            if [[ "$count" -eq "$idx" ]]; then
+                read -r _  # 跳过该规则
+                continue
+            fi
+        fi
+        echo "$line" >> "$tmp"
+    done < <(grep -v '^endpoints' "$CONFIG_FILE")
+    echo ']' >> "$tmp"
+    mv "$tmp" "$CONFIG_FILE"
     restart_realm
-    echo -e "${GREEN}已删除第 $LINE_NO 条规则。${RESET}"
+    echo "已删除规则 #$idx"
 }
 
-delete_all_rules() {
-    sed -i '/\[\[endpoints\]\]/,$d' "$REALM_CFG"
+clear_rules() {
+    echo 'endpoints = []' > "$CONFIG_FILE"
     restart_realm
-    echo -e "${GREEN}已清空所有规则。${RESET}"
+    echo "所有规则已清空。"
 }
 
-view_log() {
-    journalctl -u realm -n 50 --no-pager
+show_rules() {
+    echo "当前规则："
+    grep 'name =\|listen =\|remote =' "$CONFIG_FILE"
 }
 
-view_config() {
-    cat "$REALM_CFG"
+show_logs() {
+    journalctl -u realm --no-pager -n 50
 }
 
-menu() {
+show_config() {
+    cat "$CONFIG_FILE"
+}
+
+main_menu() {
     while true; do
-        echo -e "${GREEN}===== Realm TCP+UDP 转发脚本 =====${RESET}"
+        echo "===== Realm TCP+UDP 转发脚本 ====="
         echo "1. 安装 Realm"
         echo "2. 卸载 Realm"
         echo "3. 重启 Realm"
@@ -113,21 +132,21 @@ menu() {
         echo "8. 查看日志"
         echo "9. 查看配置"
         echo "0. 退出"
-        read -p "请选择一个操作 [0-9]: " opt
-        case "$opt" in
+        read -rp "请选择一个操作 [0-9]: " choice
+        case "$choice" in
             1) install_realm ;;
             2) uninstall_realm ;;
             3) restart_realm ;;
             4) add_rule ;;
             5) delete_rule ;;
-            6) delete_all_rules ;;
-            7) list_rules ;;
-            8) view_log ;;
-            9) view_config ;;
+            6) clear_rules ;;
+            7) show_rules ;;
+            8) show_logs ;;
+            9) show_config ;;
             0) exit 0 ;;
             *) echo "无效选项。" ;;
         esac
     done
 }
 
-menu
+main_menu
