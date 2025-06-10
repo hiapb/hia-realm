@@ -12,32 +12,39 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 install_realm() {
-    clear
-    echo -e "${GREEN}正在安装 Realm TCP+UDP万能转发脚本...${RESET}"
+    echo -e "${GREEN}正在安装 Realm TCP+UDP万能转发（zhboner/realm）...${RESET}"
 
     ARCH=$(uname -m)
-    if [[ $ARCH == "x86_64" ]]; then
-        REALM_URL="https://github.com/zhxie/realm/releases/latest/download/realm-linux-amd64"
-    elif [[ $ARCH == "aarch64" ]]; then
-        REALM_URL="https://github.com/zhxie/realm/releases/latest/download/realm-linux-arm64"
-    else
-        echo -e "${RED}不支持的架构: $ARCH${RESET}"
+    case "$ARCH" in
+        x86_64)  ARCH_NAME="x86_64-unknown-linux-gnu" ;;
+        aarch64) ARCH_NAME="aarch64-unknown-linux-gnu" ;;
+        *) echo -e "${RED}不支持的架构: $ARCH${RESET}"; read -rp "按回车返回菜单..." _; return ;;
+    esac
+
+    LATEST_VERSION=$(curl -s "https://api.github.com/repos/zhboner/realm/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    if [[ -z "$LATEST_VERSION" ]]; then
+        echo -e "${RED}获取 Realm 最新版本失败。${RESET}"
         read -rp "按回车返回菜单..." _
         return
     fi
+
+    echo -e "${GREEN}下载版本: ${YELLOW}${LATEST_VERSION}${RESET}"
+
+    TMP_DIR=$(mktemp -d)
+    DOWNLOAD_URL="https://github.com/zhboner/realm/releases/download/${LATEST_VERSION}/realm-${ARCH_NAME}.tar.gz"
+
+    echo -e "${GREEN}正在下载 ${DOWNLOAD_URL}${RESET}"
+    curl -L --fail -o "$TMP_DIR/realm.tar.gz" "$DOWNLOAD_URL" || {
+        echo -e "${RED}下载失败，请检查网络或 GitHub 可达性。${RESET}"
+        read -rp "按回车返回菜单..." _
+        return
+    }
+
+    tar -xzf "$TMP_DIR/realm.tar.gz" -C "$TMP_DIR"
+    install -m 755 "$TMP_DIR/realm" /usr/local/bin/realm
+    rm -rf "$TMP_DIR"
 
     mkdir -p /etc/realm
-    curl -L --fail -o /usr/local/bin/realm "$REALM_URL"
-    chmod +x /usr/local/bin/realm
-
-    # 校验是否可执行
-    if ! file /usr/local/bin/realm | grep -q "executable"; then
-        echo -e "${RED}下载的 realm 不是可执行文件，可能被 GitHub 重定向了。${RESET}"
-        rm -f /usr/local/bin/realm
-        read -rp "按回车返回菜单..." _
-        return
-    fi
-
     cat > /etc/realm/config.json <<EOF
 {
   "log-level": "info",
@@ -62,7 +69,7 @@ EOF
     systemctl enable realm
     systemctl start realm
 
-    echo -e "${GREEN}Realm 安装并启动成功。${RESET}"
+    echo -e "${GREEN}Realm 安装并启动完成！${RESET}"
 }
 
 uninstall_realm() {
