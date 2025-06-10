@@ -79,7 +79,7 @@ delete_rule() {
     RULES=($(grep -n '\[\[endpoints\]\]' "$CONFIG_FILE" | cut -d: -f1))
     COUNT=${#RULES[@]}
     if [ "$COUNT" -eq 0 ]; then
-        echo "${RED}无可删除规则。${RESET}"
+        echo -e "${RED}无可删除规则。${RESET}"
         return
     fi
     echo "当前转发规则："
@@ -92,7 +92,7 @@ delete_rule() {
     read -p "请输入要删除的规则编号: " IDX
     IDX=$((IDX-1))
     if [ "$IDX" -lt 0 ] || [ "$IDX" -ge "$COUNT" ]; then
-        echo "${RED}编号无效。${RESET}"
+        echo -e "${RED}编号无效。${RESET}"
         return
     fi
     START=${RULES[$IDX]}
@@ -109,7 +109,7 @@ clear_rules() {
 }
 
 list_rules() {
-    echo "${GREEN}当前转发规则：${RESET}"
+    echo -e "${GREEN}当前转发规则：${RESET}"
     grep -A3 '\[\[endpoints\]\]' "$CONFIG_FILE" | sed '/^--$/d'
 }
 
