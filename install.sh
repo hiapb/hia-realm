@@ -22,7 +22,8 @@ install_realm() {
         REALM_URL="https://github.com/zhxie/realm/releases/latest/download/realm-linux-arm64"
     else
         echo -e "${RED}不支持的架构: $ARCH${RESET}"
-        exit 1
+        read -rp "按回车返回菜单..." _
+        return
     fi
 
     mkdir -p /etc/realm
@@ -52,9 +53,8 @@ EOF
     systemctl daemon-reload
     systemctl enable realm
     systemctl start realm
+
     echo -e "${GREEN}Realm 安装并启动成功。${RESET}"
-    sleep 2
-    exit 0
 }
 
 uninstall_realm() {
