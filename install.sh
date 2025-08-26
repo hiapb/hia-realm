@@ -2,7 +2,7 @@
 CONFIG_FILE="/etc/realm/config.toml"
 REALM_BIN="/usr/local/bin/realm"
 SERVICE_FILE="/etc/systemd/system/realm.service"
-REALM_URL="https://github.com/zhboner/realm/releases/download/v2.7.0/realm-x86_64-unknown-linux-musl.tar.gz"
+REALM_URL="https://github.com/zhboner/realm/releases/download/v2.9.2/realm-x86_64-unknown-linux-musl.tar.gz"
 TMP_DIR="/tmp/realm-install"
 
 GREEN="\e[32m"
