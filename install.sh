@@ -18,9 +18,7 @@ RED="\e[31m"
 YELLOW="\e[33m"
 RESET="\e[0m"
 
-# ---------------------------
-# Basic helpers
-# ---------------------------
+
 check_root() {
   if [ "$EUID" -ne 0 ]; then
     echo -e "${RED}请以 root 用户运行此脚本。${RESET}"
@@ -59,9 +57,6 @@ EOF
   fi
 }
 
-# ---------------------------
-# Name validation (中文/字母/数字/_/-)
-# ---------------------------
 validate_name() {
   local name="$1"
   [ -z "$name" ] && return 1
@@ -91,9 +86,7 @@ validate_name() {
   return 0
 }
 
-# ---------------------------
-# Service helpers
-# ---------------------------
+
 restart_realm_silent() {
   if ! systemctl restart realm >/dev/null 2>&1; then
     systemctl restart realm || true
@@ -127,9 +120,7 @@ get_status_line() {
   fi
 }
 
-# ---------------------------
-# Arch & download
-# ---------------------------
+
 get_arch() {
   local arch
   arch="$(uname -m)"
@@ -179,15 +170,12 @@ get_latest_realm_url() {
     | cut -d '"' -f 4
 }
 
-# ---------------------------
-# Install / update / uninstall
-# ---------------------------
 install_realm_inner() {
   need_cmd curl
   need_cmd tar
   need_cmd systemctl
 
-  echo -e "${GREEN}正在安装/更新 Realm（自动最新）...${RESET}"
+  echo -e "${GREEN}正在安装 Realm ...${RESET}"
 
   local arch libc file url
   arch="$(get_arch)"
@@ -266,9 +254,7 @@ uninstall_realm() {
   echo -e "${GREEN}Realm 已卸载。${RESET}"
 }
 
-# ---------------------------
-# Rules indexing
-# ---------------------------
+
 RULE_STARTS=()
 RULE_ENDS=()
 RULE_ENABLED=()
@@ -358,8 +344,8 @@ has_ipv6() {
 choose_listen_mode_v4v6() {
   while true; do
     echo "请选择监听协议：" >&2
-    echo "1. IPv4（0.0.0.0:PORT）【默认】" >&2
-    echo "2. IPv6（[::]:PORT）" >&2
+    echo "1. IPv4【默认】" >&2
+    echo "2. IPv6" >&2
     read -p "请选择 [1-2]（默认 1）: " MODE
     MODE="${MODE:-1}"
     case "$MODE" in
@@ -405,7 +391,7 @@ port_in_use_system() {
   return 1
 }
 
-# ✅ 关键修复：所有提示输出到 stderr，避免被 NEWP 捕获写进配置
+
 prompt_listen_port_checked() {
   local mode="$1"
   local exclude="${2:-}"
@@ -434,7 +420,7 @@ prompt_listen_port_checked() {
     fi
 
     if port_in_use_system "$p"; then
-      echo -e "${YELLOW}提示：系统检测到端口 $p 正在被占用（可能是其它服务）。建议换端口。${RESET}" >&2
+      echo -e "${YELLOW}提示：系统检测到端口 $p 正在被占用。建议换端口。${RESET}" >&2
       read -p "仍然使用该端口吗？[y/N]: " ANS
       case "$ANS" in
         y|Y) echo "$p"; return 0 ;;
@@ -452,16 +438,16 @@ prompt_remote_by_mode() {
   local REMOTE=""
   while true; do
     if [ "$MODE" = "v4" ]; then
-      echo -e "${GREEN}远程目标(v4)：IPv4/域名:PORT  例：1.2.3.4:443 或 example.com:443${RESET}" >&2
+      echo -e "${GREEN}远程目标：IPv4/域名:PORT  例：1.2.3.4:443 或 example.com:443${RESET}" >&2
       read -r -p "请输入远程目标: " REMOTE
       [ -z "$REMOTE" ] && { echo -e "${RED}远程目标不能为空。${RESET}" >&2; continue; }
 
-      [[ "$REMOTE" == \[*\]:* ]] && { echo -e "${RED}你选择了 IPv4，但输入像 IPv6（带 []）。请重输。${RESET}" >&2; continue; }
-      [[ "$REMOTE" == *:* && "$REMOTE" != *"."* ]] && { echo -e "${RED}你选择了 IPv4，但输入像裸 IPv6。请重输。${RESET}" >&2; continue; }
+      [[ "$REMOTE" == \[*\]:* ]] && { echo -e "${RED}非 IPv4，请重输。${RESET}" >&2; continue; }
+      [[ "$REMOTE" == *:* && "$REMOTE" != *"."* ]] && { echo -e "${RED} 非 IPv4，请重输。${RESET}" >&2; continue; }
 
       echo "$REMOTE"; return 0
     else
-      echo -e "${GREEN}远程目标(v6)：[IPv6]:PORT  例：[2001:db8::1]:443${RESET}" >&2
+      echo -e "${GREEN}远程目标：[IPv6]:PORT  例：[2001:db8::1]:443${RESET}" >&2
       read -r -p "请输入远程目标: " REMOTE
       [ -z "$REMOTE" ] && { echo -e "${RED}远程目标不能为空。${RESET}" >&2; continue; }
 
@@ -598,9 +584,9 @@ edit_rule() {
 
   echo -e "${GREEN}选中规则：${RESET}$((IDX+1)). [${RULE_NAMES[$IDX]}] ${RULE_LISTENS[$IDX]} -> ${RULE_REMOTES[$IDX]} (${RULE_TYPES[$IDX]})"
   echo "要修改哪个字段？"
-  echo "1. 名称 name"
-  echo "2. 监听 listen（仅修改端口，不修改协议：当前 $CUR_MODE）"
-  echo "3. 远程 remote（按当前协议 $CUR_MODE 校验）"
+  echo "1. 名称"
+  echo "2. 监听端口"
+  echo "3. 远程目标:端口"
   echo "0. 返回"
   read -p "请选择 [0-3]: " OPT
 
@@ -691,13 +677,14 @@ export_rules() {
 
 import_rules() {
   ensure_config_file
-  read -p "请输入要导入的文件路径 [${DEFAULT_IMPORT_FILE}]: " IN
+  read -p "请输入要导入的文件路径（回车默认：${DEFAULT_IMPORT_FILE}）: " IN
   IN="${IN:-$DEFAULT_IMPORT_FILE}"
 
   if [ -z "$IN" ] || [ ! -f "$IN" ]; then
     echo -e "${RED}导入文件不存在：$IN${RESET}"
     return
   fi
+  
   if ! grep -q -E '^[[:space:]]*(#\s*)?\[\[endpoints\]\]' "$IN"; then
     echo -e "${RED}导入文件不包含 [[endpoints]] 块。${RESET}"
     return
@@ -725,9 +712,7 @@ EOF
   echo -e "${GREEN}导入完成并已应用。${RESET}"
 }
 
-# ---------------------------
-# Cron schedule (14) - 保持你需求
-# ---------------------------
+
 has_cron() {
   command -v crontab >/dev/null 2>&1 && return 0
   command -v cron >/dev/null 2>&1 && return 0
@@ -823,7 +808,7 @@ setup_export_cron() {
 
   echo "定时导出类型："
   echo "1. 每天"
-  echo "2. 每周（指定周几）"
+  echo "2. 每周"
   read -p "请选择 [1-2]: " T
 
   local D="*"
@@ -867,7 +852,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 $MM $HH * * $D root $EXPORT_HELPER >/dev/null 2>&1
 EOF
 
-  echo -e "${GREEN}已添加/更新定时备份任务。${RESET}"
+  echo -e "${GREEN}已添加定时备份任务。${RESET}"
   echo -e "${GREEN}Cron 文件：$CRON_FILE${RESET}"
 }
 
@@ -886,7 +871,7 @@ manage_schedule_backup() {
   echo "--------------------"
   echo "定时备份任务管理："
   echo "1. 查看当前状态"
-  echo "2. 添加/更新定时备份任务"
+  echo "2. 添加定时备份任务"
   echo "3. 删除定时备份任务"
   echo "0. 返回"
   read -p "请选择 [0-3]: " X
