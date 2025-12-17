@@ -868,6 +868,10 @@ remove_export_cron() {
 }
 
 manage_schedule_backup() {
+
+  ensure_config_file
+  mkdir -p "$EXPORT_DIR"
+
   echo "--------------------"
   echo "定时备份任务管理："
   echo "1. 查看当前状态"
@@ -885,6 +889,8 @@ manage_schedule_backup() {
 }
 
 install_ftp(){
+    ensure_config_file
+    mkdir -p "$EXPORT_DIR"
     clear
     echo -e "${GREEN}📂 FTP/SFTP 备份工具...${RESET}"
     echo -e "${YELLOW}默认 Realm 规则备份文件：${DEFAULT_EXPORT_FILE}${RESET}"
