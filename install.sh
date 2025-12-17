@@ -6,6 +6,9 @@ REALM_BIN="/usr/local/bin/realm"
 SERVICE_FILE="/etc/systemd/system/realm.service"
 TMP_DIR="/tmp/realm-install"
 
+EXPORT_DIR="/etc/realm"
+DEFAULT_EXPORT_FILE="/etc/realm/realm-rules.backup.toml"
+
 GREEN="\e[32m"
 RED="\e[31m"
 YELLOW="\e[33m"
@@ -278,13 +281,11 @@ build_rules_index() {
             ENABLED=1
         fi
 
-        # 既支持启用行，也支持被注释的 key 行
         LISTEN=$(echo "$BLOCK" | grep -m1 -E '^[[:space:]]*(#\s*)?listen' | cut -d'"' -f2)
         REMOTE=$(echo "$BLOCK" | grep -m1 -E '^[[:space:]]*(#\s*)?remote' | cut -d'"' -f2)
         TYPE=$(echo "$BLOCK"   | grep -m1 -E '^[[:space:]]*(#\s*)?type'   | cut -d'"' -f2)
         NAME=$(echo "$BLOCK"   | grep -m1 -E '^[[:space:]]*(#\s*)?name'   | cut -d'"' -f2)
 
-        # 不完整就跳过，避免垃圾输出
         if [ -z "$LISTEN" ] || [ -z "$REMOTE" ] || [ -z "$TYPE" ]; then
             continue
         fi
@@ -328,12 +329,59 @@ escape_toml() {
     echo "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+# 检测本机是否具备 IPv6（启用且至少有一个非 loopback 地址）
+has_ipv6() {
+    need_cmd ip
+
+    # sysctl 禁用检查（即便没 sysctl 命令，也继续用 ip 判断）
+    if command -v sysctl >/dev/null 2>&1; then
+        local v
+        v="$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo 0)"
+        if [ "$v" = "1" ]; then
+            return 1
+        fi
+    fi
+
+    # 判断是否存在 inet6 且不是 ::1
+    if ip -6 addr show 2>/dev/null | grep -q 'inet6'; then
+        if ip -6 addr show 2>/dev/null | grep -qv 'inet6 ::1'; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+choose_listen_mode_v4v6() {
+    # 只允许 v4 / v6，默认 v6；如果没 v6，选 v6 会提示并重选
+    while true; do
+        echo "请选择监听协议："
+        echo "1. IPv4【默认】"
+        echo "2. IPv6 "
+        read -p "请选择 [1-2]（默认 1）: " MODE
+        MODE="${MODE:-1}"
+
+        case "$MODE" in
+            1) echo "v4"; return 0 ;;
+            2)
+                if has_ipv6; then
+                    echo "v6"; return 0
+                else
+                    echo -e "${RED}检测到本机没有可用 IPv6（可能未开通或被禁用）。请改选 IPv4。${RESET}"
+                    echo ""
+                fi
+                ;;
+            *) echo -e "${RED}无效选项，请重新选择。${RESET}" ;;
+        esac
+    done
+}
+
 add_rule() {
     ensure_config_file
 
     read -p "请输入规则名称: " NAME
     read -p "请输入监听端口: " LISTEN
-    read -p "请输入远程目标 IP:PORT: " REMOTE
+    read -p "请输入远程目标（IPv4/域名:PORT；IPv6 请用 [IPv6]:PORT）: " REMOTE
 
     if [ -z "$NAME" ]; then
         echo -e "${RED}规则名称不能为空。${RESET}"
@@ -343,21 +391,40 @@ add_rule() {
         echo -e "${RED}监听端口必须是数字。${RESET}"
         return
     fi
+    if [ -z "$REMOTE" ]; then
+        echo -e "${RED}remote 不能为空。${RESET}"
+        return
+    fi
+
+    # 友好提示：可能用户输入了裸 IPv6（没加 []）
+    if [[ "$REMOTE" == *:* && "$REMOTE" != *"]"* && "$REMOTE" != *"."* ]]; then
+        echo -e "${YELLOW}检测到可能是 IPv6，请使用方括号格式，例如：[2001:db8::1]:443${RESET}"
+    fi
+
+    local MODE
+    MODE="$(choose_listen_mode_v4v6)"
 
     NAME_ESC="$(escape_toml "$NAME")"
     REMOTE_ESC="$(escape_toml "$REMOTE")"
+
+    local LISTEN_ADDR
+    if [ "$MODE" = "v6" ]; then
+        LISTEN_ADDR="[::]:$LISTEN"
+    else
+        LISTEN_ADDR="0.0.0.0:$LISTEN"
+    fi
 
     cat >> "$CONFIG_FILE" <<EOF
 
 [[endpoints]]
 name   = "$NAME_ESC"
-listen = "0.0.0.0:$LISTEN"
+listen = "$LISTEN_ADDR"
 remote = "$REMOTE_ESC"
 type   = "tcp+udp"
 EOF
 
     restart_realm_silent
-    echo -e "${GREEN}已添加规则 [$NAME] 并已应用。${RESET}"
+    echo -e "${GREEN}已添加规则 [$NAME]（$MODE）并已应用。${RESET}"
 }
 
 delete_rule() {
@@ -386,7 +453,6 @@ delete_rule() {
 clear_rules() {
     ensure_config_file
     sed -i '/\[\[endpoints\]\]/,/^$/d' "$CONFIG_FILE"
-    # 也清理注释掉的 endpoints 块
     sed -i '/^[[:space:]]*#\s*\[\[endpoints\]\]/,/^$/d' "$CONFIG_FILE"
     restart_realm_silent
     echo -e "${GREEN}已清空所有规则并已应用。${RESET}"
@@ -416,8 +482,8 @@ edit_rule() {
     echo -e "${GREEN}选中规则：${RESET}$((IDX+1)). [${RULE_NAMES[$IDX]}] ${RULE_LISTENS[$IDX]} -> ${RULE_REMOTES[$IDX]} (${RULE_TYPES[$IDX]})"
     echo "要修改哪个字段？"
     echo "1. 名称 name"
-    echo "2. 监听 listen（端口）"
-    echo "3. 远程 remote（IP:PORT 或 域名:PORT）"
+    echo "2. 监听 listen（端口/协议重新选择 v4/v6）"
+    echo "3. 远程 remote（IPv4/域名:PORT 或 [IPv6]:PORT）"
     echo "0. 返回"
     read -p "请选择 [0-3]: " OPT
 
@@ -436,10 +502,18 @@ edit_rule() {
         2)
             read -p "请输入新监听端口: " NEWP
             ! [[ "$NEWP" =~ ^[0-9]+$ ]] && { echo -e "${RED}端口必须是数字。${RESET}"; return; }
-            sed -i "${START},$((END-1))s|^[[:space:]]*(#\s*)?listen[[:space:]]*=.*|listen = \"0.0.0.0:${NEWP}\"|g" "$CONFIG_FILE"
+
+            local MODE
+            MODE="$(choose_listen_mode_v4v6)"
+
+            if [ "$MODE" = "v6" ]; then
+                sed -i "${START},$((END-1))s|^[[:space:]]*(#\s*)?listen[[:space:]]*=.*|listen = \"[::]:${NEWP}\"|g" "$CONFIG_FILE"
+            else
+                sed -i "${START},$((END-1))s|^[[:space:]]*(#\s*)?listen[[:space:]]*=.*|listen = \"0.0.0.0:${NEWP}\"|g" "$CONFIG_FILE"
+            fi
             ;;
         3)
-            read -p "请输入新远程目标（IP:PORT 或 域名:PORT）: " NEWR
+            read -p "请输入新远程目标（IPv4/域名:PORT 或 [IPv6]:PORT）: " NEWR
             [ -z "$NEWR" ] && { echo -e "${RED}remote 不能为空。${RESET}"; return; }
             NEWR_ESC="$(escape_toml "$NEWR")"
             sed -i "${START},$((END-1))s|^[[:space:]]*(#\s*)?remote[[:space:]]*=.*|remote = \"${NEWR_ESC}\"|g" "$CONFIG_FILE"
@@ -470,16 +544,88 @@ toggle_rule() {
     END=${RULE_ENDS[$IDX]}
 
     if [ "${RULE_ENABLED[$IDX]}" -eq 1 ]; then
-        # 启用 -> 暂停：整段前面加 #
         sed -i "${START},$((END-1))s|^[[:space:]]*#\{0,1\}[[:space:]]*|# |" "$CONFIG_FILE"
         restart_realm_silent
         echo -e "${GREEN}已暂停规则：${RULE_NAMES[$IDX]}${RESET}"
     else
-        # 暂停 -> 启用：去掉行首 "# " 或 "#"
         sed -i "${START},$((END-1))s|^[[:space:]]*#[[:space:]]*||" "$CONFIG_FILE"
         restart_realm_silent
         echo -e "${GREEN}已启动规则：${RULE_NAMES[$IDX]}${RESET}"
     fi
+}
+
+# ---------------------------
+# Export / Import all rules
+# ---------------------------
+export_rules() {
+    ensure_config_file
+    mkdir -p "$EXPORT_DIR"
+
+    read -p "导出文件路径 [${DEFAULT_EXPORT_FILE}]: " OUT
+    OUT="${OUT:-$DEFAULT_EXPORT_FILE}"
+
+    # 导出所有 endpoints 块（含被注释的暂停块）
+    awk '
+      BEGIN{inblk=0}
+      /^[[:space:]]*(# *|)?\[\[endpoints\]\]/{inblk=1}
+      { if(inblk) print }
+      /^[[:space:]]*$/{ if(inblk){ print ""; inblk=0 } }
+    ' "$CONFIG_FILE" > "$OUT"
+
+    if [ ! -s "$OUT" ]; then
+        echo -e "${YELLOW}未导出任何规则（可能当前没有 endpoints 块）。${RESET}"
+        echo -e "${YELLOW}导出文件路径：$OUT${RESET}"
+        return
+    fi
+
+    echo -e "${GREEN}导出完成！${RESET}"
+    echo -e "${GREEN}导出文件路径：$OUT${RESET}"
+}
+
+import_rules() {
+    ensure_config_file
+
+    read -p "请输入要导入的文件路径: " IN
+    if [ -z "$IN" ] || [ ! -f "$IN" ]; then
+        echo -e "${RED}导入文件不存在。${RESET}"
+        return
+    fi
+
+    if ! grep -q -E '^[[:space:]]*(#\s*)?\[\[endpoints\]\]' "$IN"; then
+        echo -e "${RED}导入文件不包含 [[endpoints]] 块，疑似不是规则备份文件。${RESET}"
+        return
+    fi
+
+    echo -e "${GREEN}导入文件规则数：$(grep -c -E '^[[:space:]]*(#\s*)?\[\[endpoints\]\]' "$IN")${RESET}"
+    echo "导入模式："
+    echo "1. 覆盖：清空现有规则后导入"
+    echo "2. 追加：在现有规则后追加导入"
+    read -p "请选择 [1-2]: " MODE
+
+    case "$MODE" in
+        1)
+            clear_rules
+            cat >> "$CONFIG_FILE" <<EOF
+
+# ---- Imported rules from: $IN ----
+EOF
+            cat "$IN" >> "$CONFIG_FILE"
+            ;;
+        2)
+            cat >> "$CONFIG_FILE" <<EOF
+
+# ---- Imported rules from: $IN ----
+EOF
+            cat "$IN" >> "$CONFIG_FILE"
+            ;;
+        *)
+            echo -e "${RED}无效选项。${RESET}"
+            return
+            ;;
+    esac
+
+    restart_realm_silent
+    echo -e "${GREEN}导入完成并已应用。${RESET}"
 }
 
 # ---------------------------
@@ -513,10 +659,13 @@ main_menu() {
         echo "7.  查看当前规则"
         echo "8.  修改某条规则"
         echo "9.  启动/暂停某条规则"
+        echo "--------------------"
         echo "10. 查看日志"
         echo "11. 查看配置"
+        echo "12. 一键导出所有规则"
+        echo "13. 一键导入所有规则"
         echo "0.  退出"
-        read -p "请选择一个操作 [0-11]: " OPT
+        read -p "请选择一个操作 [0-13]: " OPT
 
         case $OPT in
             1) install_realm ;;
@@ -530,8 +679,11 @@ main_menu() {
             7) require_installed && list_rules ;;
             8) require_installed && edit_rule ;;
             9) require_installed && toggle_rule ;;
+
             10) require_installed && view_log ;;
             11) require_installed && view_config ;;
+            12) require_installed && export_rules ;;
+            13) require_installed && import_rules ;;
 
             *) echo -e "${RED}无效选项。${RESET}" ;;
         esac
