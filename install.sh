@@ -9,6 +9,9 @@ TMP_DIR="/tmp/realm-install"
 EXPORT_DIR="/etc/realm"
 DEFAULT_EXPORT_FILE="/etc/realm/realm-rules.backup.toml"
 
+CRON_FILE="/etc/cron.d/realm-rules-export"
+EXPORT_HELPER="/usr/local/bin/realm-export-rules.sh"
+
 GREEN="\e[32m"
 RED="\e[31m"
 YELLOW="\e[33m"
@@ -249,7 +252,6 @@ RULE_TYPES=()
 
 get_endpoint_line_numbers_all() {
     [ -f "$CONFIG_FILE" ] || return 0
-    # 匹配启用和暂停（注释）的 endpoints 开头行号
     grep -n -E '^[[:space:]]*(#\s*)?\[\[endpoints\]\]' "$CONFIG_FILE" | cut -d: -f1
 }
 
@@ -329,35 +331,28 @@ escape_toml() {
     echo "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
-# 检测本机是否具备 IPv6（启用且至少有一个非 loopback 地址）
 has_ipv6() {
     need_cmd ip
-
-    # sysctl 禁用检查（即便没 sysctl 命令，也继续用 ip 判断）
     if command -v sysctl >/dev/null 2>&1; then
         local v
         v="$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo 0)"
-        if [ "$v" = "1" ]; then
-            return 1
-        fi
+        [ "$v" = "1" ] && return 1
     fi
 
-    # 判断是否存在 inet6 且不是 ::1
     if ip -6 addr show 2>/dev/null | grep -q 'inet6'; then
         if ip -6 addr show 2>/dev/null | grep -qv 'inet6 ::1'; then
             return 0
         fi
     fi
-
     return 1
 }
 
 choose_listen_mode_v4v6() {
-    # 只允许 v4 / v6，默认 v6；如果没 v6，选 v6 会提示并重选
+    # 默认 v4；选 v6 但无 v6 → 提示并重选
     while true; do
         echo "请选择监听协议："
-        echo "1. IPv4【默认】"
-        echo "2. IPv6 "
+        echo "1. IPv4（0.0.0.0:PORT）【默认】"
+        echo "2. IPv6（[::]:PORT）"
         read -p "请选择 [1-2]（默认 1）: " MODE
         MODE="${MODE:-1}"
 
@@ -376,33 +371,58 @@ choose_listen_mode_v4v6() {
     done
 }
 
+prompt_remote_by_mode() {
+    local MODE="$1"
+    local REMOTE=""
+
+    while true; do
+        if [ "$MODE" = "v4" ]; then
+            echo -e "${GREEN}请输入远程目标（v4 格式）：IPv4/域名:PORT  例如：1.2.3.4:443 或 example.com:443${RESET}"
+            read -r -p "remote: " REMOTE
+            [ -z "$REMOTE" ] && { echo -e "${RED}remote 不能为空。${RESET}"; continue; }
+
+            # v4：禁止 [IPv6]:PORT，也禁止裸 IPv6（包含多段 : 且不含 .）
+            if [[ "$REMOTE" == \[*\]?:* ]]; then
+                echo -e "${RED}你选择的是 IPv4，但输入看起来是 IPv6（带 []）。请按 IPv4/域名:PORT 重输。${RESET}"
+                continue
+            fi
+            if [[ "$REMOTE" == *:* && "$REMOTE" != *"."* ]]; then
+                echo -e "${RED}你选择的是 IPv4，但输入看起来是裸 IPv6。请按 IPv4/域名:PORT 重输。${RESET}"
+                continue
+            fi
+
+            echo "$REMOTE"
+            return 0
+        else
+            echo -e "${GREEN}请输入远程目标（v6 格式）：[IPv6]:PORT  例如：[2001:db8::1]:443${RESET}"
+            read -r -p "remote: " REMOTE
+            [ -z "$REMOTE" ] && { echo -e "${RED}remote 不能为空。${RESET}"; continue; }
+
+            if [[ "$REMOTE" =~ ^\[[0-9a-fA-F:]+\]:[0-9]+$ ]]; then
+                echo "$REMOTE"
+                return 0
+            else
+                echo -e "${RED}IPv6 格式不正确，必须是 [IPv6]:PORT（带方括号）。请重输。${RESET}"
+                continue
+            fi
+        fi
+    done
+}
+
 add_rule() {
     ensure_config_file
 
-    read -p "请输入规则名称: " NAME
-    read -p "请输入监听端口: " LISTEN
-    read -p "请输入远程目标（IPv4/域名:PORT；IPv6 请用 [IPv6]:PORT）: " REMOTE
-
-    if [ -z "$NAME" ]; then
-        echo -e "${RED}规则名称不能为空。${RESET}"
-        return
-    fi
-    if ! [[ "$LISTEN" =~ ^[0-9]+$ ]]; then
-        echo -e "${RED}监听端口必须是数字。${RESET}"
-        return
-    fi
-    if [ -z "$REMOTE" ]; then
-        echo -e "${RED}remote 不能为空。${RESET}"
-        return
-    fi
-
-    # 友好提示：可能用户输入了裸 IPv6（没加 []）
-    if [[ "$REMOTE" == *:* && "$REMOTE" != *"]"* && "$REMOTE" != *"."* ]]; then
-        echo -e "${YELLOW}检测到可能是 IPv6，请使用方括号格式，例如：[2001:db8::1]:443${RESET}"
-    fi
-
     local MODE
     MODE="$(choose_listen_mode_v4v6)"
+
+    read -p "请输入规则名称: " NAME
+    [ -z "$NAME" ] && { echo -e "${RED}规则名称不能为空。${RESET}"; return; }
+
+    read -p "请输入监听端口: " LISTEN
+    ! [[ "$LISTEN" =~ ^[0-9]+$ ]] && { echo -e "${RED}监听端口必须是数字。${RESET}"; return; }
+
+    local REMOTE
+    REMOTE="$(prompt_remote_by_mode "$MODE")"
 
     NAME_ESC="$(escape_toml "$NAME")"
     REMOTE_ESC="$(escape_toml "$REMOTE")"
@@ -482,8 +502,8 @@ edit_rule() {
     echo -e "${GREEN}选中规则：${RESET}$((IDX+1)). [${RULE_NAMES[$IDX]}] ${RULE_LISTENS[$IDX]} -> ${RULE_REMOTES[$IDX]} (${RULE_TYPES[$IDX]})"
     echo "要修改哪个字段？"
     echo "1. 名称 name"
-    echo "2. 监听 listen（端口/协议重新选择 v4/v6）"
-    echo "3. 远程 remote（IPv4/域名:PORT 或 [IPv6]:PORT）"
+    echo "2. 监听 listen（端口 + 重新选择 v4/v6）"
+    echo "3. 远程 remote（按 v4/v6 重新输入校验）"
     echo "0. 返回"
     read -p "请选择 [0-3]: " OPT
 
@@ -500,11 +520,11 @@ edit_rule() {
             fi
             ;;
         2)
-            read -p "请输入新监听端口: " NEWP
-            ! [[ "$NEWP" =~ ^[0-9]+$ ]] && { echo -e "${RED}端口必须是数字。${RESET}"; return; }
-
             local MODE
             MODE="$(choose_listen_mode_v4v6)"
+
+            read -p "请输入新监听端口: " NEWP
+            ! [[ "$NEWP" =~ ^[0-9]+$ ]] && { echo -e "${RED}端口必须是数字。${RESET}"; return; }
 
             if [ "$MODE" = "v6" ]; then
                 sed -i "${START},$((END-1))s|^[[:space:]]*(#\s*)?listen[[:space:]]*=.*|listen = \"[::]:${NEWP}\"|g" "$CONFIG_FILE"
@@ -513,8 +533,10 @@ edit_rule() {
             fi
             ;;
         3)
-            read -p "请输入新远程目标（IPv4/域名:PORT 或 [IPv6]:PORT）: " NEWR
-            [ -z "$NEWR" ] && { echo -e "${RED}remote 不能为空。${RESET}"; return; }
+            local MODE
+            MODE="$(choose_listen_mode_v4v6)"
+            local NEWR
+            NEWR="$(prompt_remote_by_mode "$MODE")"
             NEWR_ESC="$(escape_toml "$NEWR")"
             sed -i "${START},$((END-1))s|^[[:space:]]*(#\s*)?remote[[:space:]]*=.*|remote = \"${NEWR_ESC}\"|g" "$CONFIG_FILE"
             ;;
@@ -557,6 +579,20 @@ toggle_rule() {
 # ---------------------------
 # Export / Import all rules
 # ---------------------------
+export_rules_core() {
+    local OUT="$1"
+    ensure_config_file
+    mkdir -p "$EXPORT_DIR"
+    need_cmd awk
+
+    awk '
+      BEGIN{inblk=0}
+      /^[[:space:]]*(# *|)?\[\[endpoints\]\]/{inblk=1}
+      { if(inblk) print }
+      /^[[:space:]]*$/{ if(inblk){ print ""; inblk=0 } }
+    ' "$CONFIG_FILE" > "$OUT"
+}
+
 export_rules() {
     ensure_config_file
     mkdir -p "$EXPORT_DIR"
@@ -564,21 +600,13 @@ export_rules() {
     read -p "导出文件路径 [${DEFAULT_EXPORT_FILE}]: " OUT
     OUT="${OUT:-$DEFAULT_EXPORT_FILE}"
 
-    # 导出所有 endpoints 块（含被注释的暂停块）
-    awk '
-      BEGIN{inblk=0}
-      /^[[:space:]]*(# *|)?\[\[endpoints\]\]/{inblk=1}
-      { if(inblk) print }
-      /^[[:space:]]*$/{ if(inblk){ print ""; inblk=0 } }
-    ' "$CONFIG_FILE" > "$OUT"
+    export_rules_core "$OUT"
 
     if [ ! -s "$OUT" ]; then
         echo -e "${YELLOW}未导出任何规则（可能当前没有 endpoints 块）。${RESET}"
-        echo -e "${YELLOW}导出文件路径：$OUT${RESET}"
-        return
+    else
+        echo -e "${GREEN}导出完成！${RESET}"
     fi
-
-    echo -e "${GREEN}导出完成！${RESET}"
     echo -e "${GREEN}导出文件路径：$OUT${RESET}"
 }
 
@@ -629,6 +657,197 @@ EOF
 }
 
 # ---------------------------
+# Cron / schedule export task
+# ---------------------------
+has_cron() {
+    command -v crontab >/dev/null 2>&1 && return 0
+    command -v cron >/dev/null 2>&1 && return 0
+    command -v crond >/dev/null 2>&1 && return 0
+    return 1
+}
+
+install_cron() {
+    echo -e "${YELLOW}系统未检测到 cron/crond。${RESET}"
+    read -p "是否尝试自动安装 cron？[y/N]: " ANS
+    case "$ANS" in
+        y|Y) ;;
+        *) return 1 ;;
+    esac
+
+    if [ -f /etc/alpine-release ]; then
+        echo -e "${GREEN}检测到 Alpine Linux，安装 cronie...${RESET}"
+        need_cmd apk
+        apk add --no-cache cronie || return 1
+        rc-update add crond default >/dev/null 2>&1 || true
+        rc-service crond start >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    if [ -f /etc/debian_version ]; then
+        echo -e "${GREEN}检测到 Debian/Ubuntu，安装 cron...${RESET}"
+        need_cmd apt
+        apt update && apt install -y cron || return 1
+        systemctl enable cron >/dev/null 2>&1 || true
+        systemctl start cron >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    if [ -f /etc/redhat-release ]; then
+        echo -e "${GREEN}检测到 RHEL/CentOS，安装 cronie...${RESET}"
+        if command -v dnf >/dev/null 2>&1; then
+            dnf install -y cronie || return 1
+        else
+            need_cmd yum
+            yum install -y cronie || return 1
+        fi
+        systemctl enable crond >/dev/null 2>&1 || true
+        systemctl start crond >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    echo -e "${RED}无法识别发行版，请手动安装 cron/cronie。${RESET}"
+    return 1
+}
+
+ensure_cron_ready() {
+    if has_cron; then
+        return 0
+    fi
+    install_cron || {
+        echo -e "${RED}cron 不可用，无法创建定时任务。${RESET}"
+        return 1
+    }
+    has_cron || {
+        echo -e "${RED}cron 安装/启动失败，无法创建定时任务。${RESET}"
+        return 1
+    }
+    return 0
+}
+
+write_export_helper() {
+    mkdir -p "$EXPORT_DIR"
+    cat > "$EXPORT_HELPER" <<'EOF'
+#!/bin/bash
+set -e
+CONFIG_FILE="/etc/realm/config.toml"
+EXPORT_DIR="/etc/realm"
+mkdir -p "$EXPORT_DIR"
+ts="$(date +%F_%H%M%S)"
+OUT="$EXPORT_DIR/realm-rules.${ts}.toml"
+
+awk '
+  BEGIN{inblk=0}
+  /^[[:space:]]*(# *|)?\[\[endpoints\]\]/{inblk=1}
+  { if(inblk) print }
+  /^[[:space:]]*$/{ if(inblk){ print ""; inblk=0 } }
+' "$CONFIG_FILE" > "$OUT"
+EOF
+    chmod +x "$EXPORT_HELPER"
+}
+
+schedule_status() {
+    if [ -f "$CRON_FILE" ] && [ -x "$EXPORT_HELPER" ]; then
+        echo -e "${GREEN}定时备份：已启用${RESET}"
+        echo -e "${GREEN}Cron 文件：$CRON_FILE${RESET}"
+        echo -e "${GREEN}导出脚本：$EXPORT_HELPER${RESET}"
+        echo "当前 Cron 内容："
+        cat "$CRON_FILE"
+    else
+        echo -e "${YELLOW}定时备份：未启用${RESET}"
+    fi
+}
+
+setup_export_cron() {
+    ensure_cron_ready || return
+
+    write_export_helper
+
+    echo "定时导出类型："
+    echo "1. 每天"
+    echo "2. 每周（指定周几）"
+    read -p "请选择 [1-2]: " T
+
+    local D="*"
+    if [ "$T" = "2" ]; then
+        echo "请选择周几：1=周一 ... 6=周六 7=周日"
+        read -p "周几 [1-7]: " WD
+        case "$WD" in
+            1) D="1" ;;
+            2) D="2" ;;
+            3) D="3" ;;
+            4) D="4" ;;
+            5) D="5" ;;
+            6) D="6" ;;
+            7) D="0" ;; # cron: 周日=0
+            *) echo -e "${RED}周几输入无效。${RESET}"; return ;;
+        esac
+    elif [ "$T" != "1" ]; then
+        echo -e "${RED}无效选项。${RESET}"
+        return
+    fi
+
+    read -p "请输入小时（0-23）: " HH
+    read -p "请输入分钟（0-59）: " MM
+
+    if ! [[ "$HH" =~ ^([0-9]|1[0-9]|2[0-3])$ ]]; then
+        echo -e "${RED}小时无效。${RESET}"
+        return
+    fi
+    if ! [[ "$MM" =~ ^([0-9]|[1-5][0-9])$ ]]; then
+        echo -e "${RED}分钟无效。${RESET}"
+        return
+    fi
+
+    cat > "$CRON_FILE" <<EOF
+# Auto export realm rules (generated)
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+$MM $HH * * $D root $EXPORT_HELPER >/dev/null 2>&1
+EOF
+
+    echo -e "${GREEN}已添加/更新定时备份任务。${RESET}"
+    echo -e "${GREEN}Cron 文件：$CRON_FILE${RESET}"
+    echo -e "${GREEN}导出脚本：$EXPORT_HELPER${RESET}"
+}
+
+remove_export_cron() {
+    local removed=0
+    if [ -f "$CRON_FILE" ]; then
+        rm -f "$CRON_FILE"
+        removed=1
+    fi
+    if [ -f "$EXPORT_HELPER" ]; then
+        rm -f "$EXPORT_HELPER"
+        removed=1
+    fi
+
+    if [ "$removed" -eq 1 ]; then
+        echo -e "${GREEN}已删除定时备份任务（及导出脚本）。${RESET}"
+    else
+        echo -e "${YELLOW}未发现定时备份任务，无需删除。${RESET}"
+    fi
+}
+
+manage_schedule_backup() {
+    echo "--------------------"
+    echo "定时备份任务管理："
+    echo "1. 查看当前状态"
+    echo "2. 添加/更新定时备份任务"
+    echo "3. 删除定时备份任务"
+    echo "0. 返回"
+    read -p "请选择 [0-3]: " X
+
+    case "$X" in
+        1) schedule_status ;;
+        2) setup_export_cron ;;
+        3) remove_export_cron ;;
+        0) return ;;
+        *) echo -e "${RED}无效选项。${RESET}" ;;
+    esac
+}
+
+# ---------------------------
 # View
 # ---------------------------
 view_log() {
@@ -664,8 +883,9 @@ main_menu() {
         echo "11. 查看配置"
         echo "12. 一键导出所有规则"
         echo "13. 一键导入所有规则"
+        echo "14. 添加/删除定时备份任务"
         echo "0.  退出"
-        read -p "请选择一个操作 [0-13]: " OPT
+        read -p "请选择一个操作 [0-14]: " OPT
 
         case $OPT in
             1) install_realm ;;
@@ -684,6 +904,7 @@ main_menu() {
             11) require_installed && view_config ;;
             12) require_installed && export_rules ;;
             13) require_installed && import_rules ;;
+            14) manage_schedule_backup ;;
 
             *) echo -e "${RED}无效选项。${RESET}" ;;
         esac
