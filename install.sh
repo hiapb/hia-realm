@@ -868,10 +868,6 @@ remove_export_cron() {
 }
 
 manage_schedule_backup() {
-
-  ensure_config_file
-  mkdir -p "$EXPORT_DIR"
-
   echo "--------------------"
   echo "定时备份任务管理："
   echo "1. 查看当前状态"
@@ -889,8 +885,6 @@ manage_schedule_backup() {
 }
 
 install_ftp(){
-    ensure_config_file
-    mkdir -p "$EXPORT_DIR"
     clear
     echo -e "${GREEN}📂 FTP/SFTP 备份工具...${RESET}"
     echo -e "${YELLOW}默认 Realm 规则备份文件：${DEFAULT_EXPORT_FILE}${RESET}"
@@ -941,8 +935,8 @@ main_menu() {
       11) require_installed && cat "$CONFIG_FILE" ;;
       12) require_installed && export_rules ;;
       13) require_installed && import_rules ;;
-      14) manage_schedule_backup ;;
-      15) install_ftp ;;
+      14) require_installed && manage_schedule_backup ;;
+      15) require_installed && install_ftp ;;
       *) echo -e "${RED}无效选项。${RESET}" ;;
     esac
   done
