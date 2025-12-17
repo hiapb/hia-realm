@@ -11,6 +11,9 @@ RED="\e[31m"
 YELLOW="\e[33m"
 RESET="\e[0m"
 
+# ---------------------------
+# Basic helpers
+# ---------------------------
 check_root() {
     if [ "$EUID" -ne 0 ]; then
         echo -e "${RED}请以 root 用户运行此脚本。${RESET}"
@@ -25,6 +28,21 @@ need_cmd() {
     }
 }
 
+is_installed() {
+    [ -x "$REALM_BIN" ] && [ -f "$SERVICE_FILE" ]
+}
+
+require_installed() {
+    if ! is_installed; then
+        echo -e "${RED}Realm 未安装，请先选择 1 安装。${RESET}"
+        return 1
+    fi
+    return 0
+}
+
+# ---------------------------
+# Arch & download
+# ---------------------------
 get_arch() {
     local arch
     arch="$(uname -m)"
@@ -51,12 +69,8 @@ get_realm_filename() {
     libc="$(get_libc)"
 
     case "$arch" in
-        x86_64)
-            echo "realm-x86_64-unknown-linux-$libc.tar.gz"
-            ;;
-        aarch64)
-            echo "realm-aarch64-unknown-linux-$libc.tar.gz"
-            ;;
+        x86_64) echo "realm-x86_64-unknown-linux-$libc.tar.gz" ;;
+        aarch64) echo "realm-aarch64-unknown-linux-$libc.tar.gz" ;;
         armv7)
             if [ "$libc" = "musl" ]; then
                 echo "realm-armv7-unknown-linux-musleabihf.tar.gz"
@@ -64,9 +78,7 @@ get_realm_filename() {
                 echo "realm-armv7-unknown-linux-gnueabihf.tar.gz"
             fi
             ;;
-        *)
-            echo ""
-            ;;
+        *) echo "" ;;
     esac
 }
 
@@ -93,7 +105,7 @@ EOF
 }
 
 # ---------------------------
-# Service helpers (silent/verbose)
+# Service helpers
 # ---------------------------
 restart_realm_silent() {
     systemctl restart realm >/dev/null 2>&1 || systemctl restart realm
@@ -104,15 +116,28 @@ restart_realm_verbose() {
     echo -e "${GREEN}Realm 已重启。${RESET}"
 }
 
+get_realm_version_short() {
+    # 只提取纯版本号，比如 "2.9.2" / "2.9.2-2"
+    # 若提取失败，则返回 "未知"
+    local raw ver
+    raw="$($REALM_BIN --version 2>/dev/null || true)"
+    ver="$(echo "$raw" | sed -n 's/.*Realm[[:space:]]\([0-9][0-9.]\+\(-[0-9]\+\)\?\).*/\1/p')"
+    if [ -z "$ver" ]; then
+        echo "未知"
+    else
+        echo "$ver"
+    fi
+}
+
 get_status_line() {
-    local status ver
-    if [ ! -f "$SERVICE_FILE" ] && [ ! -x "$REALM_BIN" ]; then
+    if ! is_installed; then
         echo -e "状态：${YELLOW}未安装${RESET}"
         return
     fi
 
+    local status ver
     status="$(systemctl is-active realm 2>/dev/null || true)"
-    ver="$($REALM_BIN --version 2>/dev/null || echo "未知")"
+    ver="$(get_realm_version_short)"
 
     case "$status" in
         active) echo -e "状态：${GREEN}运行中${RESET}  |  版本：${GREEN}${ver}${RESET}" ;;
@@ -121,6 +146,9 @@ get_status_line() {
     esac
 }
 
+# ---------------------------
+# Install / uninstall
+# ---------------------------
 install_realm() {
     need_cmd curl
     need_cmd tar
@@ -178,13 +206,12 @@ WantedBy=multi-user.target
 EOF
 
     ensure_config_file
-
     systemctl daemon-reexec
     systemctl enable realm >/dev/null 2>&1 || true
     systemctl restart realm
 
     echo -e "${GREEN}Realm 安装完成。${RESET}"
-    echo -e "${GREEN}Realm 版本：$($REALM_BIN --version 2>/dev/null || echo '未知')${RESET}"
+    echo -e "${GREEN}Realm 版本：$(get_realm_version_short)${RESET}"
 }
 
 uninstall_realm() {
@@ -196,45 +223,77 @@ uninstall_realm() {
 }
 
 # ---------------------------
-# Rules parsing/printing
+# Rules indexing (valid blocks only)
 # ---------------------------
+RULE_STARTS=()
+RULE_ENDS=()
+RULE_NAMES=()
+RULE_LISTENS=()
+RULE_REMOTES=()
+RULE_TYPES=()
+
 get_endpoint_line_numbers() {
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo ""
-        return
-    fi
+    [ -f "$CONFIG_FILE" ] || return 0
     grep -n '\[\[endpoints\]\]' "$CONFIG_FILE" | cut -d: -f1
 }
 
-print_rules_pretty() {
+build_rules_index() {
+    RULE_STARTS=()
+    RULE_ENDS=()
+    RULE_NAMES=()
+    RULE_LISTENS=()
+    RULE_REMOTES=()
+    RULE_TYPES=()
+
     ensure_config_file
 
-    mapfile -t RULES < <(get_endpoint_line_numbers)
-    local COUNT=${#RULES[@]}
+    mapfile -t LINES < <(get_endpoint_line_numbers)
+    local n=${#LINES[@]}
+    [ "$n" -eq 0 ] && return 0
+
+    for ((i=0; i<n; i++)); do
+        local START END BLOCK NAME LISTEN REMOTE TYPE
+        START=${LINES[$i]}
+        END=${LINES[$((i+1))]:-99999}
+        BLOCK=$(sed -n "$START,$((END-1))p" "$CONFIG_FILE")
+
+        LISTEN=$(echo "$BLOCK" | grep -m1 '^listen' | cut -d'"' -f2)
+        REMOTE=$(echo "$BLOCK" | grep -m1 '^remote' | cut -d'"' -f2)
+        TYPE=$(echo "$BLOCK"   | grep -m1 '^type'   | cut -d'"' -f2)
+        NAME=$(echo "$BLOCK"   | grep -m1 '^name'   | cut -d'"' -f2)
+
+        # 只收录完整规则，避免 ? -> ?
+        if [ -z "$LISTEN" ] || [ -z "$REMOTE" ] || [ -z "$TYPE" ]; then
+            continue
+        fi
+
+        RULE_STARTS+=("$START")
+        RULE_ENDS+=("$END")
+        RULE_NAMES+=("${NAME:-未命名}")
+        RULE_LISTENS+=("$LISTEN")
+        RULE_REMOTES+=("$REMOTE")
+        RULE_TYPES+=("$TYPE")
+    done
+}
+
+print_rules_pretty() {
+    build_rules_index
+    local COUNT=${#RULE_STARTS[@]}
 
     if [ "$COUNT" -eq 0 ]; then
-        echo -e "${RED}当前没有任何转发规则。${RESET}"
+        echo -e "${YELLOW}暂无转发规则。${RESET}"
         return 1
     fi
 
     echo -e "${GREEN}当前转发规则：${RESET}"
     for ((i=0; i<COUNT; i++)); do
-        local START END BLOCK NAME LISTEN REMOTE TYPE
-        START=${RULES[$i]}
-        END=${RULES[$((i+1))]:-99999}
-        BLOCK=$(sed -n "$START,$((END-1))p" "$CONFIG_FILE")
-
-        NAME=$(echo "$BLOCK" | grep -m1 '^name'    | cut -d'"' -f2)
-        LISTEN=$(echo "$BLOCK" | grep -m1 'listen' | cut -d'"' -f2)
-        REMOTE=$(echo "$BLOCK" | grep -m1 'remote' | cut -d'"' -f2)
-        TYPE=$(echo "$BLOCK"   | grep -m1 'type'   | cut -d'"' -f2)
-
-        echo -e "$((i+1)). [${NAME:-未命名}] ${LISTEN:-?} -> ${REMOTE:-?} (${TYPE:-?})"
+        echo -e "$((i+1)). [${RULE_NAMES[$i]}] ${RULE_LISTENS[$i]} -> ${RULE_REMOTES[$i]} (${RULE_TYPES[$i]})"
     done
+    return 0
 }
 
 # ---------------------------
-# Rule operations (silent restart)
+# Rule operations
 # ---------------------------
 add_rule() {
     ensure_config_file
@@ -266,18 +325,11 @@ EOF
 }
 
 delete_rule() {
-    ensure_config_file
-
-    mapfile -t RULES < <(get_endpoint_line_numbers)
-    local COUNT=${#RULES[@]}
-
-    if [ "$COUNT" -eq 0 ]; then
-        echo -e "${RED}无可删除规则。${RESET}"
+    if ! print_rules_pretty; then
         return
     fi
 
-    print_rules_pretty || return
-
+    local COUNT=${#RULE_STARTS[@]}
     read -p "请输入要删除的规则编号: " IDX
     IDX=$((IDX-1))
 
@@ -287,8 +339,8 @@ delete_rule() {
     fi
 
     local START END
-    START=${RULES[$IDX]}
-    END=${RULES[$((IDX+1))]:-99999}
+    START=${RULE_STARTS[$IDX]}
+    END=${RULE_ENDS[$IDX]}
 
     sed -i "$START,$((END-1))d" "$CONFIG_FILE"
     restart_realm_silent
@@ -306,20 +358,17 @@ list_rules() {
     print_rules_pretty || true
 }
 
-# 修改规则：名字/监听端口/remote
+escape_toml() {
+    # 防止输入里包含 " 或 \ 破坏 toml
+    echo "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
 edit_rule() {
-    ensure_config_file
-
-    mapfile -t RULES < <(get_endpoint_line_numbers)
-    local COUNT=${#RULES[@]}
-
-    if [ "$COUNT" -eq 0 ]; then
-        echo -e "${RED}当前没有任何转发规则可修改。${RESET}"
+    if ! print_rules_pretty; then
         return
     fi
 
-    print_rules_pretty || return
-
+    local COUNT=${#RULE_STARTS[@]}
     read -p "请输入要修改的规则编号: " IDX
     IDX=$((IDX-1))
     if [ "$IDX" -lt 0 ] || [ "$IDX" -ge "$COUNT" ]; then
@@ -327,53 +376,40 @@ edit_rule() {
         return
     fi
 
-    local START END BLOCK
-    START=${RULES[$IDX]}
-    END=${RULES[$((IDX+1))]:-99999}
-    BLOCK=$(sed -n "$START,$((END-1))p" "$CONFIG_FILE")
+    local START END
+    START=${RULE_STARTS[$IDX]}
+    END=${RULE_ENDS[$IDX]}
 
-    local CUR_NAME CUR_LISTEN CUR_REMOTE CUR_TYPE
-    CUR_NAME=$(echo "$BLOCK" | grep -m1 '^name'    | cut -d'"' -f2)
-    CUR_LISTEN=$(echo "$BLOCK" | grep -m1 'listen' | cut -d'"' -f2)
-    CUR_REMOTE=$(echo "$BLOCK" | grep -m1 'remote' | cut -d'"' -f2)
-    CUR_TYPE=$(echo "$BLOCK"   | grep -m1 'type'   | cut -d'"' -f2)
-
-    echo -e "${GREEN}选中规则：${RESET}$((IDX+1)). [${CUR_NAME:-未命名}] ${CUR_LISTEN:-?} -> ${CUR_REMOTE:-?} (${CUR_TYPE:-?})"
+    echo -e "${GREEN}选中规则：${RESET}$((IDX+1)). [${RULE_NAMES[$IDX]}] ${RULE_LISTENS[$IDX]} -> ${RULE_REMOTES[$IDX]} (${RULE_TYPES[$IDX]})"
     echo "要修改哪个字段？"
     echo "1. 名称 name"
     echo "2. 监听 listen（端口）"
-    echo "3. 远程 remote（IP:PORT）"
+    echo "3. 远程 remote（IP:PORT 或 域名:PORT）"
     echo "0. 返回"
     read -p "请选择 [0-3]: " OPT
 
     case "$OPT" in
         1)
             read -p "请输入新名称: " NEW
-            if [ -z "$NEW" ]; then
-                echo -e "${RED}名称不能为空。${RESET}"
-                return
-            fi
-            if echo "$BLOCK" | grep -q '^name'; then
-                sed -i "${START},$((END-1))s|^name[[:space:]]*=.*|name   = \"${NEW}\"|g" "$CONFIG_FILE"
+            [ -z "$NEW" ] && { echo -e "${RED}名称不能为空。${RESET}"; return; }
+            NEW_ESC="$(escape_toml "$NEW")"
+
+            if sed -n "${START},$((END-1))p" "$CONFIG_FILE" | grep -q '^name'; then
+                sed -i "${START},$((END-1))s|^name[[:space:]]*=.*|name   = \"${NEW_ESC}\"|g" "$CONFIG_FILE"
             else
-                sed -i "${START}a name   = \"${NEW}\"" "$CONFIG_FILE"
+                sed -i "${START}a name   = \"${NEW_ESC}\"" "$CONFIG_FILE"
             fi
             ;;
         2)
             read -p "请输入新监听端口: " NEWP
-            if ! [[ "$NEWP" =~ ^[0-9]+$ ]]; then
-                echo -e "${RED}端口必须是数字。${RESET}"
-                return
-            fi
+            ! [[ "$NEWP" =~ ^[0-9]+$ ]] && { echo -e "${RED}端口必须是数字。${RESET}"; return; }
             sed -i "${START},$((END-1))s|^listen[[:space:]]*=.*|listen = \"0.0.0.0:${NEWP}\"|g" "$CONFIG_FILE"
             ;;
         3)
             read -p "请输入新远程目标（IP:PORT 或 域名:PORT）: " NEWR
-            if [ -z "$NEWR" ]; then
-                echo -e "${RED}remote 不能为空。${RESET}"
-                return
-            fi
-            sed -i "${START},$((END-1))s|^remote[[:space:]]*=.*|remote = \"${NEWR}\"|g" "$CONFIG_FILE"
+            [ -z "$NEWR" ] && { echo -e "${RED}remote 不能为空。${RESET}"; return; }
+            NEWR_ESC="$(escape_toml "$NEWR")"
+            sed -i "${START},$((END-1))s|^remote[[:space:]]*=.*|remote = \"${NEWR_ESC}\"|g" "$CONFIG_FILE"
             ;;
         0) return ;;
         *) echo -e "${RED}无效选项。${RESET}"; return ;;
@@ -383,6 +419,9 @@ edit_rule() {
     echo -e "${GREEN}规则已修改并已应用。${RESET}"
 }
 
+# ---------------------------
+# View
+# ---------------------------
 view_log() {
     journalctl -u realm --no-pager --since "1 hour ago"
 }
@@ -392,6 +431,9 @@ view_config() {
     cat "$CONFIG_FILE"
 }
 
+# ---------------------------
+# Menu
+# ---------------------------
 main_menu() {
     check_root
     while true; do
@@ -411,18 +453,21 @@ main_menu() {
         echo "10. 查看配置"
         echo "0.  退出"
         read -p "请选择一个操作 [0-10]: " OPT
+
         case $OPT in
             1) install_realm ;;
             2) uninstall_realm ;;
-            3) restart_realm_verbose ;;
-            4) add_rule ;;
-            5) delete_rule ;;
-            6) clear_rules ;;
-            7) list_rules ;;
-            8) edit_rule ;;
-            9) view_log ;;
-            10) view_config ;;
             0) exit 0 ;;
+
+            3) require_installed && restart_realm_verbose ;;
+            4) require_installed && add_rule ;;
+            5) require_installed && delete_rule ;;
+            6) require_installed && clear_rules ;;
+            7) require_installed && list_rules ;;
+            8) require_installed && edit_rule ;;
+            9) require_installed && view_log ;;
+            10) require_installed && view_config ;;
+
             *) echo -e "${RED}无效选项。${RESET}" ;;
         esac
     done
