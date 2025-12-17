@@ -657,7 +657,7 @@ toggle_rule() {
 export_rules() {
   ensure_config_file
   mkdir -p "$EXPORT_DIR"
-  read -p "导出文件路径 [${DEFAULT_EXPORT_FILE}]: " OUT
+  read -p "导出文件路径 [默认 ${DEFAULT_EXPORT_FILE}]: " OUT
   OUT="${OUT:-$DEFAULT_EXPORT_FILE}"
 
   awk '
