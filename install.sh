@@ -248,9 +248,30 @@ list_rules() {
         echo -e "${RED}配置文件不存在：$CONFIG_FILE${RESET}"
         return
     fi
+
+    mapfile -t RULES < <(grep -n '\[\[endpoints\]\]' "$CONFIG_FILE" | cut -d: -f1)
+    COUNT=${#RULES[@]}
+
+    if [ "$COUNT" -eq 0 ]; then
+        echo -e "${RED}当前没有任何转发规则。${RESET}"
+        return
+    fi
+
     echo -e "${GREEN}当前转发规则：${RESET}"
-    grep -A3 '\[\[endpoints\]\]' "$CONFIG_FILE" | sed '/^--$/d' || true
+    for ((i=0; i<COUNT; i++)); do
+        START=${RULES[$i]}
+        END=${RULES[$((i+1))]:-99999}
+
+        BLOCK=$(sed -n "$START,$((END-1))p" "$CONFIG_FILE")
+
+        LISTEN=$(echo "$BLOCK" | grep -m1 listen | cut -d'"' -f2)
+        REMOTE=$(echo "$BLOCK" | grep -m1 remote | cut -d'"' -f2)
+        TYPE=$(echo "$BLOCK" | grep -m1 type   | cut -d'"' -f2)
+
+        echo -e "$((i+1)). ${LISTEN:-?} -> ${REMOTE:-?} (${TYPE:-?})"
+    done
 }
+
 
 view_log() {
     journalctl -u realm --no-pager --since "1 hour ago"
