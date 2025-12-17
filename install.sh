@@ -47,64 +47,76 @@ require_installed() {
 }
 
 # ---------------------------
-# Input validation
+# Name validation (中文/字母/数字/_/-)
 # ---------------------------
-# 校验 name：防止控制字符/乱码/导致 toml 异常的字符
 validate_name() {
   local name="$1"
-
-  # 不能为空
   [ -z "$name" ] && return 1
 
-  # 长度限制（1~50）
+  # 长度 1-50
   local len
   len="$(printf "%s" "$name" | wc -m | tr -d ' ')"
-  if [ "$len" -lt 1 ] || [ "$len" -gt 50 ]; then
-    return 1
-  fi
+  [ "$len" -lt 1 ] || [ "$len" -gt 50 ] && return 1
 
-  # UTF-8 校验（如果有 iconv）
+  # UTF-8 校验（有 iconv 就做）
   if command -v iconv >/dev/null 2>&1; then
-    if ! printf "%s" "$name" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
-      return 1
-    fi
+    printf "%s" "$name" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || return 1
   fi
 
-  # 禁止控制字符（包含不可见字符）
-  # 这里按字节检查：0x00-0x1F 和 0x7F
-  if printf "%s" "$name" | LC_ALL=C grep -q $'[\x00-\x1F\x7F]'; then
+  # 控制字符检查（用 awk 的 [[:cntrl:]]，避免 grep 正则兼容问题）
+  if printf "%s" "$name" | LC_ALL=C awk '{
+        for(i=1;i<=length($0);i++){
+          c=substr($0,i,1)
+          if (c ~ /[[:cntrl:]]/) { exit 1 }
+        }
+        exit 0
+      }'; then
+    : 
+  else
     return 1
   fi
 
-  # 禁止 " 和 \ （避免 toml/转义问题）
-  if [[ "$name" == *'"'* ]] || [[ "$name" == *'\'* ]]; then
-    return 1
-  fi
+  # 仅允许：中文(一-龥)、字母数字、_、-
+  # 用 awk 做，避免 grep “Invalid regular expression”
+  printf "%s" "$name" | awk '
+    BEGIN{ok=1}
+    {
+      if ($0 ~ /[^0-9A-Za-z_一-龥-]/) ok=0
+    }
+    END{exit ok?0:1}
+  ' || return 1
 
   return 0
 }
 
-# 端口占用检测：优先 ss，没 ss 用 netstat；都没有就跳过（但会提示）
+# ---------------------------
+# Port in use check (ss/netstat)
+# ---------------------------
 port_in_use() {
   local port="$1"
+
   if command -v ss >/dev/null 2>&1; then
-    # 任意协议监听都算占用（更安全）
-    if ss -H -lntu "sport = :$port" 2>/dev/null | grep -q .; then
-      return 0
-    fi
-    return 1
-  elif command -v netstat >/dev/null 2>&1; then
-    if netstat -lntu 2>/dev/null | awk '{print $4}' | grep -E "[:.]$port$" -q; then
-      return 0
-    fi
-    return 1
-  else
-    echo -e "${YELLOW}提示：未检测到 ss/netstat，无法检查端口占用。${RESET}" >&2
-    return 1
+    # 取本地地址列，匹配 :port 结尾（兼容 [::]:port / 0.0.0.0:port）
+    ss -H -lntu 2>/dev/null | awk '{print $4}' | awk -v p=":$port" '
+      $0 ~ (p"$") {found=1}
+      END{exit found?0:1}
+    '
+    return $?
   fi
+
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -lntu 2>/dev/null | awk '{print $4}' | awk -v p=":$port" '
+      $0 ~ (p"$") {found=1}
+      END{exit found?0:1}
+    '
+    return $?
+  fi
+
+  # 没工具就不阻塞
+  echo -e "${YELLOW}提示：未检测到 ss/netstat，无法检查端口占用。${RESET}" >&2
+  return 1
 }
 
-# 读取端口并检查占用（允许传入一个“例外端口”，用于编辑时原端口不算占用）
 prompt_listen_port_checked() {
   local except_port="${1:-}"
   local p=""
@@ -118,15 +130,18 @@ prompt_listen_port_checked() {
       echo -e "${RED}端口范围必须是 1-65535。${RESET}"
       continue
     fi
-    # 编辑时，允许与原端口相同
+
+    # 编辑：允许保持原端口
     if [ -n "$except_port" ] && [ "$p" = "$except_port" ]; then
       echo "$p"
       return 0
     fi
+
     if port_in_use "$p"; then
-      echo -e "${RED}端口 $p 已被占用，请换一个端口。${RESET}"
+      echo -e "${RED}端口 $p 已被占用，请重新输入。${RESET}"
       continue
     fi
+
     echo "$p"
     return 0
   done
@@ -211,7 +226,7 @@ restart_realm_verbose() {
 get_realm_version_short() {
   local raw ver
   raw="$($REALM_BIN --version 2>/dev/null || true)"
-  ver="$(echo "$raw" | sed -n 's/.*Realm[[:space:]]\([0-9][0-9.]\+\(-[0-9]\+\)\?\).*/\1/p')"
+  ver="$(echo "$raw" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]/){print $i; exit}}')"
   [ -z "$ver" ] && echo "未知" || echo "$ver"
 }
 
@@ -225,14 +240,11 @@ get_status_line() {
   status="$(systemctl is-active realm 2>/dev/null || true)"
   ver="$(get_realm_version_short)"
 
-  case "$status" in
-    active)
-      echo -e "状态：${GREEN}运行中${RESET}  |  版本：${GREEN}${ver}${RESET}"
-      ;;
-    inactive|failed|deactivating|activating|*)
-      echo -e "状态：${RED}未运行${RESET}  |  版本：${GREEN}${ver}${RESET}"
-      ;;
-  esac
+  if [ "$status" = "active" ]; then
+    echo -e "状态：${GREEN}运行中${RESET}  |  版本：${GREEN}${ver}${RESET}"
+  else
+    echo -e "状态：${RED}未运行${RESET}  |  版本：${GREEN}${ver}${RESET}"
+  fi
 }
 
 # ---------------------------
@@ -257,13 +269,12 @@ install_realm_inner() {
 
   url="$(get_latest_realm_url || true)"
   if [ -z "$url" ]; then
-    echo -e "${RED}获取 Realm 最新版本下载地址失败。可能是网络/限流或 release 中无对应包：$file${RESET}"
+    echo -e "${RED}获取 Realm 最新版本下载地址失败。${RESET}"
     exit 1
   fi
 
   echo -e "${GREEN}检测到架构：$arch  libc：$libc${RESET}"
   echo -e "${GREEN}将下载：$file${RESET}"
-  echo -e "${GREEN}下载地址：$url${RESET}"
 
   mkdir -p "$TMP_DIR"
   cd "$TMP_DIR" || exit 1
@@ -273,7 +284,7 @@ install_realm_inner() {
   tar -xzf realm.tar.gz
 
   if [ ! -f "realm" ]; then
-    echo -e "${RED}解压后未找到 realm 可执行文件，请检查压缩包内容。${RESET}"
+    echo -e "${RED}解压后未找到 realm 可执行文件。${RESET}"
     exit 1
   fi
 
@@ -372,9 +383,7 @@ build_rules_index() {
     TYPE="$(echo "$BLOCK"   | grep -m1 -E '^[[:space:]]*(#\s*)?type'   | cut -d'"' -f2)"
     NAME="$(echo "$BLOCK"   | grep -m1 -E '^[[:space:]]*(#\s*)?name'   | cut -d'"' -f2)"
 
-    if [ -z "$LISTEN" ] || [ -z "$REMOTE" ] || [ -z "$TYPE" ]; then
-      continue
-    fi
+    [ -z "$LISTEN" ] || [ -z "$REMOTE" ] || [ -z "$TYPE" ] && continue
 
     RULE_STARTS+=("$START")
     RULE_ENDS+=("$END")
@@ -389,7 +398,6 @@ build_rules_index() {
 print_rules_pretty() {
   build_rules_index
   local COUNT=${#RULE_STARTS[@]}
-
   if [ "$COUNT" -eq 0 ]; then
     echo -e "${YELLOW}暂无转发规则。${RESET}"
     return 1
@@ -398,29 +406,29 @@ print_rules_pretty() {
   echo -e "${GREEN}当前转发规则：${RESET}"
   for ((i=0; i<COUNT; i++)); do
     local st
-    if [ "${RULE_ENABLED[$i]}" -eq 1 ]; then st="启用"; else st="暂停"; fi
+    [ "${RULE_ENABLED[$i]}" -eq 1 ] && st="启用" || st="暂停"
     echo -e "$((i+1)). [${st}] [${RULE_NAMES[$i]}] ${RULE_LISTENS[$i]} -> ${RULE_REMOTES[$i]} (${RULE_TYPES[$i]})"
   done
   return 0
 }
 
 # ---------------------------
-# Safe edit (no sed -i)
+# Safe edit (no sed replace)
 # ---------------------------
 escape_toml() {
   # 只转义 \ 和 "
-  echo "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+  printf "%s" "$1" | awk '{
+    gsub(/\\/,"\\\\"); gsub(/"/,"\\\"");
+    print
+  }'
 }
 
 apply_block_key_update() {
-  # args: start end enabled key new_value
+  # args: start end enabled key value
   local start="$1" end="$2" enabled="$3" key="$4" value="$5"
   local tmp="${CONFIG_FILE}.tmp.$$"
   local prefix=""
-
-  if [ "$enabled" -eq 0 ]; then
-    prefix="# "
-  fi
+  [ "$enabled" -eq 0 ] && prefix="# "
 
   awk -v S="$start" -v E="$end" -v K="$key" -v V="$value" -v PFX="$prefix" '
     function is_key_line(line, key) {
@@ -446,16 +454,14 @@ apply_block_key_update() {
 }
 
 # ---------------------------
-# IPv6 & input flows (prints to stderr for $(...) safety)
+# IPv6 / prompts (stdout only returns value)
 # ---------------------------
 has_ipv6() {
   command -v ip >/dev/null 2>&1 || return 1
-  if command -v sysctl >/dev/null 2>&1; then
-    local v
-    v="$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo 0)"
-    [ "$v" = "1" ] && return 1
-  fi
-  ip -6 addr show 2>/dev/null | grep -qv 'inet6 ::1' && ip -6 addr show 2>/dev/null | grep -q 'inet6'
+  ip -6 addr show 2>/dev/null | awk '
+    /inet6/ && $2 !~ /^::1/ {ok=1}
+    END{exit ok?0:1}
+  '
 }
 
 choose_listen_mode_v4v6() {
@@ -472,7 +478,7 @@ choose_listen_mode_v4v6() {
         if has_ipv6; then
           echo "v6"; return 0
         else
-          echo -e "${RED}检测到本机没有可用 IPv6（可能未开通或被禁用）。请改选 IPv4。${RESET}" >&2
+          echo -e "${RED}本机无可用 IPv6，请改选 IPv4。${RESET}" >&2
         fi
         ;;
       *) echo -e "${RED}无效选项，请重新选择。${RESET}" >&2 ;;
@@ -482,17 +488,17 @@ choose_listen_mode_v4v6() {
 
 listen_mode_from_value() {
   local v="$1"
-  if [[ "$v" == \[*\]* ]]; then echo "v6"; else echo "v4"; fi
+  [[ "$v" == \[*\]* ]] && echo "v6" || echo "v4"
 }
 
 get_port_from_listen() {
-  # listen like 0.0.0.0:123 or [::]:123
-  echo "$1" | sed -E 's/^.*:([0-9]+)$/\1/'
+  local v="$1"
+  echo "${v##*:}"
 }
 
 replace_listen_port_keep_proto() {
   local listen="$1" newp="$2"
-  echo "$listen" | sed -E "s/:[0-9]+$/:$newp/"
+  echo "${listen%:*}:$newp"
 }
 
 prompt_remote_by_mode() {
@@ -500,31 +506,31 @@ prompt_remote_by_mode() {
   local REMOTE=""
   while true; do
     if [ "$MODE" = "v4" ]; then
-      echo -e "${GREEN}请输入远程目标（v4）：IPv4/域名:PORT  例如：1.2.3.4:443 或 example.com:443${RESET}" >&2
+      echo -e "${GREEN}远程目标(v4)：IPv4/域名:PORT  例：1.2.3.4:443 或 example.com:443${RESET}" >&2
       read -r -p "请输入远程目标: " REMOTE
       [ -z "$REMOTE" ] && { echo -e "${RED}远程目标不能为空。${RESET}" >&2; continue; }
 
       if [[ "$REMOTE" == \[*\]:* ]]; then
-        echo -e "${RED}你选择的是 IPv4，但输入像 IPv6（带 []）。请按 IPv4/域名:PORT 重输。${RESET}" >&2
+        echo -e "${RED}你选择了 IPv4，但输入像 IPv6（带 []）。请重输。${RESET}" >&2
         continue
       fi
       if [[ "$REMOTE" == *:* && "$REMOTE" != *"."* ]]; then
-        echo -e "${RED}你选择的是 IPv4，但输入像裸 IPv6。请按 IPv4/域名:PORT 重输。${RESET}" >&2
+        echo -e "${RED}你选择了 IPv4，但输入像裸 IPv6。请重输。${RESET}" >&2
         continue
       fi
-      echo "$REMOTE"
-      return 0
+
+      echo "$REMOTE"; return 0
     else
-      echo -e "${GREEN}请输入远程目标（v6）：[IPv6]:PORT  例如：[2001:db8::1]:443${RESET}" >&2
+      echo -e "${GREEN}远程目标(v6)：[IPv6]:PORT  例：[2001:db8::1]:443${RESET}" >&2
       read -r -p "请输入远程目标: " REMOTE
       [ -z "$REMOTE" ] && { echo -e "${RED}远程目标不能为空。${RESET}" >&2; continue; }
 
-      if [[ "$REMOTE" =~ ^\[[0-9a-fA-F:]+\]:[0-9]+$ ]]; then
-        echo "$REMOTE"
-        return 0
-      else
-        echo -e "${RED}IPv6 格式不正确，必须是 [IPv6]:PORT（带方括号）。请重输。${RESET}" >&2
-      fi
+      echo "$REMOTE" | awk '
+        $0 ~ /^\[[0-9A-Fa-f:]+\]:[0-9]+$/ {ok=1}
+        END{exit ok?0:1}
+      ' || { echo -e "${RED}IPv6 格式必须是 [IPv6]:PORT，请重输。${RESET}" >&2; continue; }
+
+      echo "$REMOTE"; return 0
     fi
   done
 }
@@ -541,10 +547,8 @@ add_rule() {
   local NAME
   while true; do
     read -p "请输入规则名称: " NAME
-    if validate_name "$NAME"; then
-      break
-    fi
-    echo -e "${RED}名称不合法：请避免控制字符/乱码/引号/反斜杠，长度 1-50。${RESET}"
+    if validate_name "$NAME"; then break; fi
+    echo -e "${RED}名称不合法：仅允许 中文/字母/数字/_/-，长度 1-50。${RESET}"
   done
 
   local LISTEN
@@ -647,17 +651,14 @@ edit_rule() {
       local NEW
       while true; do
         read -p "请输入新名称: " NEW
-        if validate_name "$NEW"; then
-          break
-        fi
-        echo -e "${RED}名称不合法：请避免控制字符/乱码/引号/反斜杠，长度 1-50。${RESET}"
+        if validate_name "$NEW"; then break; fi
+        echo -e "${RED}名称不合法：仅允许 中文/字母/数字/_/-，长度 1-50。${RESET}"
       done
       apply_block_key_update "$START" "$END" "$ENABLED" "name" "$(escape_toml "$NEW")"
       ;;
     2)
       local NEWP
       NEWP="$(prompt_listen_port_checked "$CUR_PORT")"
-
       local NEW_LISTEN
       NEW_LISTEN="$(replace_listen_port_keep_proto "$CUR_LISTEN" "$NEWP")"
       apply_block_key_update "$START" "$END" "$ENABLED" "listen" "$NEW_LISTEN"
@@ -712,25 +713,19 @@ toggle_rule() {
 # ---------------------------
 # Export / Import
 # ---------------------------
-export_rules_core() {
-  local OUT="$1"
+export_rules() {
   ensure_config_file
   mkdir -p "$EXPORT_DIR"
-  need_cmd awk
+  read -p "导出文件路径 [${DEFAULT_EXPORT_FILE}]: " OUT
+  OUT="${OUT:-$DEFAULT_EXPORT_FILE}"
+
   awk '
     BEGIN{inblk=0}
     /^[[:space:]]*(# *|)?\[\[endpoints\]\]/{inblk=1}
     { if(inblk) print }
     /^[[:space:]]*$/{ if(inblk){ print ""; inblk=0 } }
   ' "$CONFIG_FILE" > "$OUT"
-}
 
-export_rules() {
-  ensure_config_file
-  mkdir -p "$EXPORT_DIR"
-  read -p "导出文件路径 [${DEFAULT_EXPORT_FILE}]: " OUT
-  OUT="${OUT:-$DEFAULT_EXPORT_FILE}"
-  export_rules_core "$OUT"
   if [ ! -s "$OUT" ]; then
     echo -e "${YELLOW}未导出任何规则（可能当前没有 endpoints 块）。${RESET}"
   else
@@ -747,37 +742,27 @@ import_rules() {
     return
   fi
   if ! grep -q -E '^[[:space:]]*(#\s*)?\[\[endpoints\]\]' "$IN"; then
-    echo -e "${RED}导入文件不包含 [[endpoints]] 块，疑似不是规则备份文件。${RESET}"
+    echo -e "${RED}导入文件不包含 [[endpoints]] 块。${RESET}"
     return
   fi
 
   echo -e "${GREEN}导入文件规则数：$(grep -c -E '^[[:space:]]*(#\s*)?\[\[endpoints\]\]' "$IN")${RESET}"
   echo "导入模式："
-  echo "1. 覆盖：清空现有规则后导入"
-  echo "2. 追加：在现有规则后追加导入"
+  echo "1. 覆盖（清空现有规则后导入）"
+  echo "2. 追加（在现有规则后追加导入）"
   read -p "请选择 [1-2]: " MODE
 
   case "$MODE" in
-    1)
-      clear_rules
-      cat >> "$CONFIG_FILE" <<EOF
-
-# ---- Imported rules from: $IN ----
-EOF
-      cat "$IN" >> "$CONFIG_FILE"
-      ;;
-    2)
-      cat >> "$CONFIG_FILE" <<EOF
-
-# ---- Imported rules from: $IN ----
-EOF
-      cat "$IN" >> "$CONFIG_FILE"
-      ;;
-    *)
-      echo -e "${RED}无效选项。${RESET}"
-      return
-      ;;
+    1) clear_rules ;;
+    2) ;;
+    *) echo -e "${RED}无效选项。${RESET}"; return ;;
   esac
+
+  cat >> "$CONFIG_FILE" <<EOF
+
+# ---- Imported rules from: $IN ----
+EOF
+  cat "$IN" >> "$CONFIG_FILE"
 
   restart_realm_silent
   echo -e "${GREEN}导入完成并已应用。${RESET}"
@@ -799,7 +784,6 @@ install_cron() {
   case "$ANS" in y|Y) ;; *) return 1 ;; esac
 
   if [ -f /etc/alpine-release ]; then
-    echo -e "${GREEN}检测到 Alpine Linux，安装 cronie...${RESET}"
     need_cmd apk
     apk add --no-cache cronie || return 1
     rc-update add crond default >/dev/null 2>&1 || true
@@ -808,7 +792,6 @@ install_cron() {
   fi
 
   if [ -f /etc/debian_version ]; then
-    echo -e "${GREEN}检测到 Debian/Ubuntu，安装 cron...${RESET}"
     need_cmd apt
     apt update && apt install -y cron || return 1
     systemctl enable cron >/dev/null 2>&1 || true
@@ -817,7 +800,6 @@ install_cron() {
   fi
 
   if [ -f /etc/redhat-release ]; then
-    echo -e "${GREEN}检测到 RHEL/CentOS，安装 cronie...${RESET}"
     if command -v dnf >/dev/null 2>&1; then
       dnf install -y cronie || return 1
     else
@@ -865,8 +847,7 @@ schedule_status() {
   if [ -f "$CRON_FILE" ] && [ -x "$EXPORT_HELPER" ]; then
     echo -e "${GREEN}定时备份：已启用${RESET}"
     echo -e "${GREEN}Cron 文件：$CRON_FILE${RESET}"
-    echo -e "${GREEN}导出脚本：$EXPORT_HELPER${RESET}"
-    echo "当前 Cron 内容："
+    echo "Cron 内容："
     cat "$CRON_FILE"
   else
     echo -e "${YELLOW}定时备份：未启用${RESET}"
@@ -875,8 +856,7 @@ schedule_status() {
 
 normalize_hhmm() {
   local x="$1"
-  x="$(echo "$x" | sed 's/^0*//')"
-  [ -z "$x" ] && x="0"
+  x="${x#0}"; [ -z "$x" ] && x="0"
   echo "$x"
 }
 
@@ -949,7 +929,7 @@ manage_schedule_backup() {
   echo "--------------------"
   echo "定时备份任务管理："
   echo "1. 查看当前状态"
-  echo "2. 添加定时备份任务"
+  echo "2. 添加/更新定时备份任务"
   echo "3. 删除定时备份任务"
   echo "0. 返回"
   read -p "请选择 [0-3]: " X
@@ -961,12 +941,6 @@ manage_schedule_backup() {
     *) echo -e "${RED}无效选项。${RESET}" ;;
   esac
 }
-
-# ---------------------------
-# View
-# ---------------------------
-view_log() { journalctl -u realm --no-pager --since "1 hour ago"; }
-view_config() { ensure_config_file; cat "$CONFIG_FILE"; }
 
 # ---------------------------
 # Menu
@@ -1007,11 +981,11 @@ main_menu() {
       7) require_installed && list_rules ;;
       8) require_installed && edit_rule ;;
       9) require_installed && toggle_rule ;;
-      10) require_installed && view_log ;;
-      11) require_installed && view_config ;;
       12) require_installed && export_rules ;;
       13) require_installed && import_rules ;;
       14) manage_schedule_backup ;;
+      10) require_installed && journalctl -u realm --no-pager --since "1 hour ago" ;;
+      11) require_installed && cat "$CONFIG_FILE" ;;
       *) echo -e "${RED}无效选项。${RESET}" ;;
     esac
   done
