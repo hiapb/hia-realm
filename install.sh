@@ -47,9 +47,6 @@ require_installed() {
   return 0
 }
 
-# ---------------------------
-# Config bootstrap
-# ---------------------------
 ensure_config_file() {
   mkdir -p "$(dirname "$CONFIG_FILE")"
   if [ ! -f "$CONFIG_FILE" ]; then
@@ -64,7 +61,6 @@ EOF
 
 # ---------------------------
 # Name validation (中文/字母/数字/_/-)
-# 你如果要“严格只允许中文字母数字”，把 _- 从正则里去掉即可
 # ---------------------------
 validate_name() {
   local name="$1"
@@ -78,7 +74,6 @@ validate_name() {
     printf "%s" "$name" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || return 1
   fi
 
-  # 控制字符检查：用 awk 避免 busybox grep 不兼容
   if printf "%s" "$name" | LC_ALL=C awk '{
         for(i=1;i<=length($0);i++){
           c=substr($0,i,1)
@@ -87,7 +82,6 @@ validate_name() {
         exit 0
       }'; then :; else return 1; fi
 
-  # 仅允许：中文/字母/数字/_/-
   printf "%s" "$name" | awk '
     BEGIN{ok=1}
     { if ($0 ~ /[^0-9A-Za-z_一-龥-]/) ok=0 }
@@ -101,7 +95,9 @@ validate_name() {
 # Service helpers
 # ---------------------------
 restart_realm_silent() {
-  systemctl restart realm >/dev/null 2>&1 || systemctl restart realm
+  if ! systemctl restart realm >/dev/null 2>&1; then
+    systemctl restart realm || true
+  fi
 }
 
 restart_realm_verbose() {
@@ -348,40 +344,15 @@ print_rules_pretty() {
   return 0
 }
 
-# ---------------------------
-# TOML safe escape (minimal)
-# ---------------------------
-escape_toml() {
-  printf "%s" "$1" | awk '{gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); print}'
-}
+escape_toml() { printf "%s" "$1" | awk '{gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); print}'; }
 
-# ---------------------------
-# Listen helpers
-# ---------------------------
-listen_mode_from_value() {
-  local v="$1"
-  [[ "$v" == \[*\]* ]] && echo "v6" || echo "v4"
-}
+listen_mode_from_value() { [[ "$1" == \[*\]* ]] && echo "v6" || echo "v4"; }
+get_port_from_listen() { echo "${1##*:}"; }
+replace_listen_port_keep_proto() { echo "${1%:*}:$2"; }
 
-get_port_from_listen() {
-  local v="$1"
-  echo "${v##*:}"
-}
-
-replace_listen_port_keep_proto() {
-  local listen="$1" newp="$2"
-  echo "${listen%:*}:$newp"
-}
-
-# ---------------------------
-# IPv6 check
-# ---------------------------
 has_ipv6() {
   command -v ip >/dev/null 2>&1 || return 1
-  ip -6 addr show 2>/dev/null | awk '
-    /inet6/ && $2 !~ /^::1/ {ok=1}
-    END{exit ok?0:1}
-  '
+  ip -6 addr show 2>/dev/null | awk '/inet6/ && $2 !~ /^::1/ {ok=1} END{exit ok?0:1}'
 }
 
 choose_listen_mode_v4v6() {
@@ -391,7 +362,6 @@ choose_listen_mode_v4v6() {
     echo "2. IPv6（[::]:PORT）" >&2
     read -p "请选择 [1-2]（默认 1）: " MODE
     MODE="${MODE:-1}"
-
     case "$MODE" in
       1) echo "v4"; return 0 ;;
       2)
@@ -406,20 +376,12 @@ choose_listen_mode_v4v6() {
   done
 }
 
-# ---------------------------
-# Port checks
-# 1) 先查“配置冲突”（最重要、最可靠）
-# 2) 再查“系统占用”（可选）
-# ---------------------------
 config_port_conflict() {
-  # args: mode(v4/v6) port exclude_index(0-based or empty)
   local mode="$1" port="$2" exclude="${3:-}"
   build_rules_index
   local i listen p m
   for ((i=0; i<${#RULE_LISTENS[@]}; i++)); do
-    if [ -n "$exclude" ] && [ "$i" -eq "$exclude" ]; then
-      continue
-    fi
+    [ -n "$exclude" ] && [ "$i" -eq "$exclude" ] && continue
     listen="${RULE_LISTENS[$i]}"
     m="$(listen_mode_from_value "$listen")"
     p="$(get_port_from_listen "$listen")"
@@ -433,24 +395,18 @@ config_port_conflict() {
 port_in_use_system() {
   local port="$1"
   if command -v ss >/dev/null 2>&1; then
-    ss -H -lntu 2>/dev/null | awk '{print $4}' | awk -v p=":$port" '
-      $0 ~ (p"$") {found=1}
-      END{exit found?0:1}
-    '
+    ss -H -lntu 2>/dev/null | awk '{print $4}' | awk -v p=":$port" '$0 ~ (p"$") {found=1} END{exit found?0:1}'
     return $?
   fi
   if command -v netstat >/dev/null 2>&1; then
-    netstat -lntu 2>/dev/null | awk '{print $4}' | awk -v p=":$port" '
-      $0 ~ (p"$") {found=1}
-      END{exit found?0:1}
-    '
+    netstat -lntu 2>/dev/null | awk '{print $4}' | awk -v p=":$port" '$0 ~ (p"$") {found=1} END{exit found?0:1}'
     return $?
   fi
   return 1
 }
 
+# ✅ 关键修复：所有提示输出到 stderr，避免被 NEWP 捕获写进配置
 prompt_listen_port_checked() {
-  # args: mode exclude_index(0-based or empty) except_port(optional)
   local mode="$1"
   local exclude="${2:-}"
   local except_port="${3:-}"
@@ -459,29 +415,26 @@ prompt_listen_port_checked() {
   while true; do
     read -p "请输入监听端口: " p
     if ! [[ "$p" =~ ^[0-9]+$ ]]; then
-      echo -e "${RED}监听端口必须是数字。${RESET}"
+      echo -e "${RED}监听端口必须是数字。${RESET}" >&2
       continue
     fi
     if [ "$p" -lt 1 ] || [ "$p" -gt 65535 ]; then
-      echo -e "${RED}端口范围必须是 1-65535。${RESET}"
+      echo -e "${RED}端口范围必须是 1-65535。${RESET}" >&2
       continue
     fi
 
-    # 编辑：允许保持原端口
     if [ -n "$except_port" ] && [ "$p" = "$except_port" ]; then
       echo "$p"
       return 0
     fi
 
-    # ① 配置冲突（必拦）
     if config_port_conflict "$mode" "$p" "$exclude"; then
-      echo -e "${RED}端口 $p 已被其它规则占用（配置冲突），请重新输入。${RESET}"
+      echo -e "${RED}端口 $p 已被其它规则占用（配置冲突），请重新输入。${RESET}" >&2
       continue
     fi
 
-    # ② 系统占用（尽量提示）
     if port_in_use_system "$p"; then
-      echo -e "${YELLOW}提示：系统检测到端口 $p 正在被占用（可能是其它服务）。建议换端口。${RESET}"
+      echo -e "${YELLOW}提示：系统检测到端口 $p 正在被占用（可能是其它服务）。建议换端口。${RESET}" >&2
       read -p "仍然使用该端口吗？[y/N]: " ANS
       case "$ANS" in
         y|Y) echo "$p"; return 0 ;;
@@ -494,11 +447,33 @@ prompt_listen_port_checked() {
   done
 }
 
-# ---------------------------
-# Block update (awk safe)
-# ---------------------------
+prompt_remote_by_mode() {
+  local MODE="$1"
+  local REMOTE=""
+  while true; do
+    if [ "$MODE" = "v4" ]; then
+      echo -e "${GREEN}远程目标(v4)：IPv4/域名:PORT  例：1.2.3.4:443 或 example.com:443${RESET}" >&2
+      read -r -p "请输入远程目标: " REMOTE
+      [ -z "$REMOTE" ] && { echo -e "${RED}远程目标不能为空。${RESET}" >&2; continue; }
+
+      [[ "$REMOTE" == \[*\]:* ]] && { echo -e "${RED}你选择了 IPv4，但输入像 IPv6（带 []）。请重输。${RESET}" >&2; continue; }
+      [[ "$REMOTE" == *:* && "$REMOTE" != *"."* ]] && { echo -e "${RED}你选择了 IPv4，但输入像裸 IPv6。请重输。${RESET}" >&2; continue; }
+
+      echo "$REMOTE"; return 0
+    else
+      echo -e "${GREEN}远程目标(v6)：[IPv6]:PORT  例：[2001:db8::1]:443${RESET}" >&2
+      read -r -p "请输入远程目标: " REMOTE
+      [ -z "$REMOTE" ] && { echo -e "${RED}远程目标不能为空。${RESET}" >&2; continue; }
+
+      echo "$REMOTE" | awk '$0 ~ /^\[[0-9A-Fa-f:]+\]:[0-9]+$/ {ok=1} END{exit ok?0:1}' \
+        || { echo -e "${RED}IPv6 格式必须是 [IPv6]:PORT，请重输。${RESET}" >&2; continue; }
+
+      echo "$REMOTE"; return 0
+    fi
+  done
+}
+
 apply_block_key_update() {
-  # args: start end enabled key value
   local start="$1" end="$2" enabled="$3" key="$4" value="$5"
   local tmp="${CONFIG_FILE}.tmp.$$"
   local prefix=""
@@ -525,43 +500,6 @@ apply_block_key_update() {
   mv "$tmp" "$CONFIG_FILE"
 }
 
-# ---------------------------
-# Remote input
-# ---------------------------
-prompt_remote_by_mode() {
-  local MODE="$1"
-  local REMOTE=""
-  while true; do
-    if [ "$MODE" = "v4" ]; then
-      echo -e "${GREEN}远程目标(v4)：IPv4/域名:PORT  例：1.2.3.4:443 或 example.com:443${RESET}" >&2
-      read -r -p "请输入远程目标: " REMOTE
-      [ -z "$REMOTE" ] && { echo -e "${RED}远程目标不能为空。${RESET}" >&2; continue; }
-
-      if [[ "$REMOTE" == \[*\]:* ]]; then
-        echo -e "${RED}你选择了 IPv4，但输入像 IPv6（带 []）。请重输。${RESET}" >&2
-        continue
-      fi
-      if [[ "$REMOTE" == *:* && "$REMOTE" != *"."* ]]; then
-        echo -e "${RED}你选择了 IPv4，但输入像裸 IPv6。请重输。${RESET}" >&2
-        continue
-      fi
-      echo "$REMOTE"; return 0
-    else
-      echo -e "${GREEN}远程目标(v6)：[IPv6]:PORT  例：[2001:db8::1]:443${RESET}" >&2
-      read -r -p "请输入远程目标: " REMOTE
-      [ -z "$REMOTE" ] && { echo -e "${RED}远程目标不能为空。${RESET}" >&2; continue; }
-
-      echo "$REMOTE" | awk '$0 ~ /^\[[0-9A-Fa-f:]+\]:[0-9]+$/ {ok=1} END{exit ok?0:1}' \
-        || { echo -e "${RED}IPv6 格式必须是 [IPv6]:PORT，请重输。${RESET}" >&2; continue; }
-
-      echo "$REMOTE"; return 0
-    fi
-  done
-}
-
-# ---------------------------
-# Rule operations
-# ---------------------------
 add_rule() {
   ensure_config_file
 
@@ -586,11 +524,7 @@ add_rule() {
   REMOTE_ESC="$(escape_toml "$REMOTE")"
 
   local LISTEN_ADDR
-  if [ "$MODE" = "v6" ]; then
-    LISTEN_ADDR="[::]:$LISTEN"
-  else
-    LISTEN_ADDR="0.0.0.0:$LISTEN"
-  fi
+  [ "$MODE" = "v6" ] && LISTEN_ADDR="[::]:$LISTEN" || LISTEN_ADDR="0.0.0.0:$LISTEN"
 
   cat >> "$CONFIG_FILE" <<EOF
 
@@ -682,9 +616,7 @@ edit_rule() {
       ;;
     2)
       local NEWP
-      # 这里会排除当前规则 IDX，并且 except_port=CUR_PORT 允许原样不变
       NEWP="$(prompt_listen_port_checked "$CUR_MODE" "$IDX" "$CUR_PORT")"
-
       local NEW_LISTEN
       NEW_LISTEN="$(replace_listen_port_keep_proto "$CUR_LISTEN" "$NEWP")"
       apply_block_key_update "$START" "$END" "$ENABLED" "listen" "$NEW_LISTEN"
@@ -736,9 +668,6 @@ toggle_rule() {
   fi
 }
 
-# ---------------------------
-# Export / Import
-# ---------------------------
 export_rules() {
   ensure_config_file
   mkdir -p "$EXPORT_DIR"
@@ -797,7 +726,7 @@ EOF
 }
 
 # ---------------------------
-# Cron schedule (14) - unchanged from你的需求
+# Cron schedule (14) - 保持你需求
 # ---------------------------
 has_cron() {
   command -v crontab >/dev/null 2>&1 && return 0
