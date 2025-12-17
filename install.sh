@@ -159,7 +159,7 @@ install_realm_inner() {
     need_cmd tar
     need_cmd systemctl
 
-    echo -e "${GREEN}正在安装/更新 Realm（自动最新）...${RESET}"
+    echo -e "${GREEN}正在安装 Realm...${RESET}"
 
     local arch libc file url
     arch="$(get_arch)"
@@ -331,44 +331,43 @@ escape_toml() {
     echo "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
-has_ipv6() {
-    need_cmd ip
-    if command -v sysctl >/dev/null 2>&1; then
-        local v
-        v="$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo 0)"
-        [ "$v" = "1" ] && return 1
-    fi
-
-    if ip -6 addr show 2>/dev/null | grep -q 'inet6'; then
-        if ip -6 addr show 2>/dev/null | grep -qv 'inet6 ::1'; then
-            return 0
-        fi
-    fi
-    return 1
-}
-
 choose_listen_mode_v4v6() {
-    # 默认 v4；选 v6 但无 v6 → 提示并重选
     while true; do
         echo "请选择监听协议："
-        echo "1. IPv4（0.0.0.0:PORT）【默认】"
-        echo "2. IPv6（[::]:PORT）"
+        echo "1. IPv4【默认】"
+        echo "2. IPv6"
         read -p "请选择 [1-2]（默认 1）: " MODE
         MODE="${MODE:-1}"
 
         case "$MODE" in
             1) echo "v4"; return 0 ;;
-            2)
-                if has_ipv6; then
-                    echo "v6"; return 0
-                else
-                    echo -e "${RED}检测到本机没有可用 IPv6（可能未开通或被禁用）。请改选 IPv4。${RESET}"
-                    echo ""
-                fi
-                ;;
+            2) echo "v6"; return 0 ;;
             *) echo -e "${RED}无效选项，请重新选择。${RESET}" ;;
         esac
     done
+}
+
+
+listen_mode_from_value() {
+    local v="$1"
+    if [[ "$v" == \[*\]* ]]; then
+        echo "v6"
+    else
+        echo "v4"
+    fi
+}
+
+
+replace_listen_port_keep_proto() {
+    local listen="$1"
+    local newp="$2"
+    # v6: [::]:123 -> [::]:NEW
+    if [[ "$listen" =~ ^\[[^]]+\]:[0-9]+$ ]]; then
+        echo "$listen" | sed -E "s/:[0-9]+$/:$newp/"
+        return
+    fi
+    # v4: 0.0.0.0:123 -> 0.0.0.0:NEW
+    echo "$listen" | sed -E "s/:[0-9]+$/:$newp/"
 }
 
 prompt_remote_by_mode() {
@@ -377,12 +376,11 @@ prompt_remote_by_mode() {
 
     while true; do
         if [ "$MODE" = "v4" ]; then
-            echo -e "${GREEN}请输入远程目标（v4 格式）：IPv4/域名:PORT  例如：1.2.3.4:443 或 example.com:443${RESET}"
+            echo -e "${GREEN}请输入远程目标：IPv4/域名:PORT ${RESET}"
             read -r -p "remote: " REMOTE
             [ -z "$REMOTE" ] && { echo -e "${RED}remote 不能为空。${RESET}"; continue; }
 
-            # v4：禁止 [IPv6]:PORT，也禁止裸 IPv6（包含多段 : 且不含 .）
-            if [[ "$REMOTE" == \[*\]?:* ]]; then
+            if [[ "$REMOTE" == \[*\]:* ]]; then
                 echo -e "${RED}你选择的是 IPv4，但输入看起来是 IPv6（带 []）。请按 IPv4/域名:PORT 重输。${RESET}"
                 continue
             fi
@@ -390,11 +388,10 @@ prompt_remote_by_mode() {
                 echo -e "${RED}你选择的是 IPv4，但输入看起来是裸 IPv6。请按 IPv4/域名:PORT 重输。${RESET}"
                 continue
             fi
-
             echo "$REMOTE"
             return 0
         else
-            echo -e "${GREEN}请输入远程目标（v6 格式）：[IPv6]:PORT  例如：[2001:db8::1]:443${RESET}"
+            echo -e "${GREEN}请输入远程目标：[IPv6]:PORT  例如：[2001:db8::1]:443${RESET}"
             read -r -p "remote: " REMOTE
             [ -z "$REMOTE" ] && { echo -e "${RED}remote 不能为空。${RESET}"; continue; }
 
@@ -499,11 +496,16 @@ edit_rule() {
     START=${RULE_STARTS[$IDX]}
     END=${RULE_ENDS[$IDX]}
 
+    # 当前 listen/remote
+    local CUR_LISTEN CUR_MODE
+    CUR_LISTEN="${RULE_LISTENS[$IDX]}"
+    CUR_MODE="$(listen_mode_from_value "$CUR_LISTEN")"
+
     echo -e "${GREEN}选中规则：${RESET}$((IDX+1)). [${RULE_NAMES[$IDX]}] ${RULE_LISTENS[$IDX]} -> ${RULE_REMOTES[$IDX]} (${RULE_TYPES[$IDX]})"
     echo "要修改哪个字段？"
     echo "1. 名称 name"
-    echo "2. 监听 listen（端口 + 重新选择 v4/v6）"
-    echo "3. 远程 remote（按 v4/v6 重新输入校验）"
+    echo "2. 监听 listen"
+    echo "3. 远程 remote"
     echo "0. 返回"
     read -p "请选择 [0-3]: " OPT
 
@@ -520,23 +522,17 @@ edit_rule() {
             fi
             ;;
         2)
-            local MODE
-            MODE="$(choose_listen_mode_v4v6)"
-
             read -p "请输入新监听端口: " NEWP
             ! [[ "$NEWP" =~ ^[0-9]+$ ]] && { echo -e "${RED}端口必须是数字。${RESET}"; return; }
 
-            if [ "$MODE" = "v6" ]; then
-                sed -i "${START},$((END-1))s|^[[:space:]]*(#\s*)?listen[[:space:]]*=.*|listen = \"[::]:${NEWP}\"|g" "$CONFIG_FILE"
-            else
-                sed -i "${START},$((END-1))s|^[[:space:]]*(#\s*)?listen[[:space:]]*=.*|listen = \"0.0.0.0:${NEWP}\"|g" "$CONFIG_FILE"
-            fi
+            local NEW_LISTEN
+            NEW_LISTEN="$(replace_listen_port_keep_proto "$CUR_LISTEN" "$NEWP")"
+
+            sed -i "${START},$((END-1))s|^[[:space:]]*(#\s*)?listen[[:space:]]*=.*|listen = \"${NEW_LISTEN}\"|g" "$CONFIG_FILE"
             ;;
         3)
-            local MODE
-            MODE="$(choose_listen_mode_v4v6)"
             local NEWR
-            NEWR="$(prompt_remote_by_mode "$MODE")"
+            NEWR="$(prompt_remote_by_mode "$CUR_MODE")"
             NEWR_ESC="$(escape_toml "$NEWR")"
             sed -i "${START},$((END-1))s|^[[:space:]]*(#\s*)?remote[[:space:]]*=.*|remote = \"${NEWR_ESC}\"|g" "$CONFIG_FILE"
             ;;
@@ -577,7 +573,7 @@ toggle_rule() {
 }
 
 # ---------------------------
-# Export / Import all rules
+# Export / Import
 # ---------------------------
 export_rules_core() {
     local OUT="$1"
@@ -657,7 +653,7 @@ EOF
 }
 
 # ---------------------------
-# Cron / schedule export task
+# Cron schedule (14)
 # ---------------------------
 has_cron() {
     command -v crontab >/dev/null 2>&1 && return 0
@@ -757,14 +753,20 @@ schedule_status() {
     fi
 }
 
+normalize_hhmm() {
+    local x="$1"
+    x="$(echo "$x" | sed 's/^0*//')"
+    [ -z "$x" ] && x="0"
+    echo "$x"
+}
+
 setup_export_cron() {
     ensure_cron_ready || return
-
     write_export_helper
 
     echo "定时导出类型："
     echo "1. 每天"
-    echo "2. 每周（指定周几）"
+    echo "2. 每周"
     read -p "请选择 [1-2]: " T
 
     local D="*"
@@ -778,7 +780,7 @@ setup_export_cron() {
             4) D="4" ;;
             5) D="5" ;;
             6) D="6" ;;
-            7) D="0" ;; # cron: 周日=0
+            7) D="0" ;;
             *) echo -e "${RED}周几输入无效。${RESET}"; return ;;
         esac
     elif [ "$T" != "1" ]; then
@@ -789,11 +791,14 @@ setup_export_cron() {
     read -p "请输入小时（0-23）: " HH
     read -p "请输入分钟（0-59）: " MM
 
-    if ! [[ "$HH" =~ ^([0-9]|1[0-9]|2[0-3])$ ]]; then
+    HH="$(normalize_hhmm "$HH")"
+    MM="$(normalize_hhmm "$MM")"
+
+    if ! [[ "$HH" =~ ^[0-9]+$ ]] || [ "$HH" -lt 0 ] || [ "$HH" -gt 23 ]; then
         echo -e "${RED}小时无效。${RESET}"
         return
     fi
-    if ! [[ "$MM" =~ ^([0-9]|[1-5][0-9])$ ]]; then
+    if ! [[ "$MM" =~ ^[0-9]+$ ]] || [ "$MM" -lt 0 ] || [ "$MM" -gt 59 ]; then
         echo -e "${RED}分钟无效。${RESET}"
         return
     fi
@@ -806,7 +811,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 $MM $HH * * $D root $EXPORT_HELPER >/dev/null 2>&1
 EOF
 
-    echo -e "${GREEN}已添加/更新定时备份任务。${RESET}"
+    echo -e "${GREEN}已添加定时备份任务。${RESET}"
     echo -e "${GREEN}Cron 文件：$CRON_FILE${RESET}"
     echo -e "${GREEN}导出脚本：$EXPORT_HELPER${RESET}"
 }
@@ -833,7 +838,7 @@ manage_schedule_backup() {
     echo "--------------------"
     echo "定时备份任务管理："
     echo "1. 查看当前状态"
-    echo "2. 添加/更新定时备份任务"
+    echo "2. 添加定时备份任务"
     echo "3. 删除定时备份任务"
     echo "0. 返回"
     read -p "请选择 [0-3]: " X
