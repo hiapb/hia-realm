@@ -398,18 +398,18 @@ main_menu() {
         echo -e "${GREEN}===== Realm TCP+UDP 转发脚本 =====${RESET}"
         get_status_line
         echo "----------------------------------"
-        echo "1. 安装 Realm"
-        echo "2. 卸载 Realm"
-        echo "3. 重启 Realm"
+        echo "1.  安装 Realm"
+        echo "2.  卸载 Realm"
+        echo "3.  重启 Realm"
         echo "--------------------"
-        echo "4. 添加转发规则"
-        echo "5. 删除单条规则"
-        echo "6. 删除全部规则"
-        echo "7. 查看当前规则"
-        echo "8. 修改某条规则"
-        echo "9. 查看日志"
+        echo "4.  添加转发规则"
+        echo "5.  删除单条规则"
+        echo "6.  删除全部规则"
+        echo "7.  查看当前规则"
+        echo "8.  修改某条规则"
+        echo "9.  查看日志"
         echo "10. 查看配置"
-        echo "0. 退出"
+        echo "0.  退出"
         read -p "请选择一个操作 [0-10]: " OPT
         case $OPT in
             1) install_realm ;;
