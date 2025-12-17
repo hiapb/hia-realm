@@ -37,7 +37,6 @@ get_arch() {
 }
 
 get_libc() {
-    # musl: Alpine/部分OpenWRT; gnu: Debian/Ubuntu/CentOS...
     if ldd --version 2>&1 | grep -qi musl; then
         echo "musl"
     else
@@ -58,7 +57,6 @@ get_realm_filename() {
             echo "realm-aarch64-unknown-linux-$libc.tar.gz"
             ;;
         armv7)
-            # 32位 ARM：官方文件名里是 armv7 + (gnu|musl) + eabihf
             if [ "$libc" = "musl" ]; then
                 echo "realm-armv7-unknown-linux-musleabihf.tar.gz"
             else
@@ -74,15 +72,23 @@ get_realm_filename() {
 get_latest_realm_url() {
     local file
     file="$(get_realm_filename)"
-    if [ -z "$file" ]; then
-        return 1
-    fi
+    [ -z "$file" ] && return 1
 
-    # 取 latest release 中匹配的平台包
     curl -s https://api.github.com/repos/zhboner/realm/releases/latest \
       | grep browser_download_url \
       | grep "$file" \
       | cut -d '"' -f 4
+}
+
+ensure_config_file() {
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    if [ ! -f "$CONFIG_FILE" ]; then
+        cat > "$CONFIG_FILE" <<EOF
+# 默认配置
+# 每条规则一个 [[endpoints]] 块
+# 本脚本支持自定义字段 name 用于区分规则（Realm 会忽略未知字段）
+EOF
+    fi
 }
 
 install_realm() {
@@ -127,7 +133,6 @@ install_realm() {
     mv realm "$REALM_BIN"
     chmod +x "$REALM_BIN"
 
-    # systemd service
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Realm Proxy
@@ -142,20 +147,14 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 EOF
 
-    mkdir -p "$(dirname "$CONFIG_FILE")"
-    if [ ! -f "$CONFIG_FILE" ]; then
-        cat > "$CONFIG_FILE" <<EOF
-# 默认配置
-# 添加规则会自动追加 [[endpoints]] 块
-EOF
-    fi
+    ensure_config_file
 
     systemctl daemon-reexec
     systemctl enable realm >/dev/null 2>&1 || true
     systemctl restart realm
 
     echo -e "${GREEN}Realm 安装完成。${RESET}"
-    echo -e "${GREEN}Realm 版本信息：$($REALM_BIN --version 2>/dev/null || echo '未知')${RESET}"
+    echo -e "${GREEN}Realm 版本：$($REALM_BIN --version 2>/dev/null || echo '未知')${RESET}"
 }
 
 uninstall_realm() {
@@ -171,9 +170,54 @@ restart_realm() {
     echo -e "${GREEN}Realm 已重启。${RESET}"
 }
 
+# 解析 endpoints 块起始行号数组
+get_endpoint_line_numbers() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo ""
+        return
+    fi
+    grep -n '\[\[endpoints\]\]' "$CONFIG_FILE" | cut -d: -f1
+}
+
+print_rules_pretty() {
+    ensure_config_file
+
+    mapfile -t RULES < <(get_endpoint_line_numbers)
+    local COUNT=${#RULES[@]}
+
+    if [ "$COUNT" -eq 0 ]; then
+        echo -e "${RED}当前没有任何转发规则。${RESET}"
+        return 1
+    fi
+
+    echo -e "${GREEN}当前转发规则：${RESET}"
+    for ((i=0; i<COUNT; i++)); do
+        local START END BLOCK NAME LISTEN REMOTE TYPE
+        START=${RULES[$i]}
+        END=${RULES[$((i+1))]:-99999}
+
+        BLOCK=$(sed -n "$START,$((END-1))p" "$CONFIG_FILE")
+
+        NAME=$(echo "$BLOCK" | grep -m1 '^name'   | cut -d'"' -f2)
+        LISTEN=$(echo "$BLOCK" | grep -m1 'listen' | cut -d'"' -f2)
+        REMOTE=$(echo "$BLOCK" | grep -m1 'remote' | cut -d'"' -f2)
+        TYPE=$(echo "$BLOCK"   | grep -m1 'type'   | cut -d'"' -f2)
+
+        echo -e "$((i+1)). [${NAME:-未命名}] ${LISTEN:-?} -> ${REMOTE:-?} (${TYPE:-?})"
+    done
+}
+
 add_rule() {
+    ensure_config_file
+
+    read -p "请输入规则名称（用于区分）: " NAME
     read -p "请输入监听端口: " LISTEN
     read -p "请输入远程目标 IP:PORT: " REMOTE
+
+    if [ -z "$NAME" ]; then
+        echo -e "${RED}规则名称不能为空。${RESET}"
+        return
+    fi
 
     if ! [[ "$LISTEN" =~ ^[0-9]+$ ]]; then
         echo -e "${RED}监听端口必须是数字。${RESET}"
@@ -183,38 +227,29 @@ add_rule() {
     cat >> "$CONFIG_FILE" <<EOF
 
 [[endpoints]]
+name   = "$NAME"
 listen = "0.0.0.0:$LISTEN"
 remote = "$REMOTE"
-type = "tcp+udp"
+type   = "tcp+udp"
 EOF
 
     restart_realm
-    echo -e "${GREEN}已添加规则并重启 Realm。${RESET}"
+    echo -e "${GREEN}已添加规则 [$NAME] 并重启 Realm。${RESET}"
 }
 
 delete_rule() {
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo -e "${RED}配置文件不存在：$CONFIG_FILE${RESET}"
-        return
-    fi
+    ensure_config_file
 
-    mapfile -t RULES < <(grep -n '\[\[endpoints\]\]' "$CONFIG_FILE" | cut -d: -f1)
-    COUNT=${#RULES[@]}
+    mapfile -t RULES < <(get_endpoint_line_numbers)
+    local COUNT=${#RULES[@]}
 
     if [ "$COUNT" -eq 0 ]; then
         echo -e "${RED}无可删除规则。${RESET}"
         return
     fi
 
-    echo "当前转发规则："
-    for ((i=0; i<COUNT; i++)); do
-        START=${RULES[$i]}
-        END=${RULES[$((i+1))]:-99999}
-        BLOCK=$(sed -n "$START,$((END-1))p" "$CONFIG_FILE")
-        L=$(echo "$BLOCK" | grep -m1 listen | cut -d'"' -f2)
-        R=$(echo "$BLOCK" | grep -m1 remote | cut -d'"' -f2)
-        echo -e "$((i+1)). ${L:-?} -> ${R:-?}"
-    done
+    # 统一展示风格
+    print_rules_pretty || return
 
     read -p "请输入要删除的规则编号: " IDX
     IDX=$((IDX-1))
@@ -224,6 +259,7 @@ delete_rule() {
         return
     fi
 
+    local START END
     START=${RULES[$IDX]}
     END=${RULES[$((IDX+1))]:-99999}
 
@@ -233,55 +269,22 @@ delete_rule() {
 }
 
 clear_rules() {
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo -e "${RED}配置文件不存在：$CONFIG_FILE${RESET}"
-        return
-    fi
-    # 删除 [[endpoints]] 到空行的块
+    ensure_config_file
     sed -i '/\[\[endpoints\]\]/,/^$/d' "$CONFIG_FILE"
     restart_realm
     echo -e "${GREEN}已清空所有规则并重启 Realm。${RESET}"
 }
 
 list_rules() {
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo -e "${RED}配置文件不存在：$CONFIG_FILE${RESET}"
-        return
-    fi
-
-    mapfile -t RULES < <(grep -n '\[\[endpoints\]\]' "$CONFIG_FILE" | cut -d: -f1)
-    COUNT=${#RULES[@]}
-
-    if [ "$COUNT" -eq 0 ]; then
-        echo -e "${RED}当前没有任何转发规则。${RESET}"
-        return
-    fi
-
-    echo -e "${GREEN}当前转发规则：${RESET}"
-    for ((i=0; i<COUNT; i++)); do
-        START=${RULES[$i]}
-        END=${RULES[$((i+1))]:-99999}
-
-        BLOCK=$(sed -n "$START,$((END-1))p" "$CONFIG_FILE")
-
-        LISTEN=$(echo "$BLOCK" | grep -m1 listen | cut -d'"' -f2)
-        REMOTE=$(echo "$BLOCK" | grep -m1 remote | cut -d'"' -f2)
-        TYPE=$(echo "$BLOCK" | grep -m1 type   | cut -d'"' -f2)
-
-        echo -e "$((i+1)). ${LISTEN:-?} -> ${REMOTE:-?} (${TYPE:-?})"
-    done
+    print_rules_pretty || true
 }
-
 
 view_log() {
     journalctl -u realm --no-pager --since "1 hour ago"
 }
 
 view_config() {
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo -e "${RED}配置文件不存在：$CONFIG_FILE${RESET}"
-        return
-    fi
+    ensure_config_file
     cat "$CONFIG_FILE"
 }
 
