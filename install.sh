@@ -8,6 +8,7 @@ TMP_DIR="/tmp/realm-install"
 
 GREEN="\e[32m"
 RED="\e[31m"
+YELLOW="\e[33m"
 RESET="\e[0m"
 
 check_root() {
@@ -31,7 +32,7 @@ get_arch() {
         x86_64) echo "x86_64" ;;
         aarch64|arm64) echo "aarch64" ;;
         armv7l) echo "armv7" ;;
-        armv6l) echo "armv7" ;; # 尽量兼容
+        armv6l) echo "armv7" ;;
         *) echo "unsupported" ;;
     esac
 }
@@ -89,6 +90,35 @@ ensure_config_file() {
 # 本脚本支持自定义字段 name 用于区分规则（Realm 会忽略未知字段）
 EOF
     fi
+}
+
+# ---------------------------
+# Service helpers (silent/verbose)
+# ---------------------------
+restart_realm_silent() {
+    systemctl restart realm >/dev/null 2>&1 || systemctl restart realm
+}
+
+restart_realm_verbose() {
+    systemctl restart realm
+    echo -e "${GREEN}Realm 已重启。${RESET}"
+}
+
+get_status_line() {
+    local status ver
+    if [ ! -f "$SERVICE_FILE" ] && [ ! -x "$REALM_BIN" ]; then
+        echo -e "状态：${YELLOW}未安装${RESET}"
+        return
+    fi
+
+    status="$(systemctl is-active realm 2>/dev/null || true)"
+    ver="$($REALM_BIN --version 2>/dev/null || echo "未知")"
+
+    case "$status" in
+        active) echo -e "状态：${GREEN}运行中${RESET}  |  版本：${GREEN}${ver}${RESET}" ;;
+        inactive|failed) echo -e "状态：${RED}${status}${RESET}  |  版本：${GREEN}${ver}${RESET}" ;;
+        *) echo -e "状态：${YELLOW}${status:-未知}${RESET}  |  版本：${GREEN}${ver}${RESET}" ;;
+    esac
 }
 
 install_realm() {
@@ -165,12 +195,9 @@ uninstall_realm() {
     echo -e "${GREEN}Realm 已卸载。${RESET}"
 }
 
-restart_realm() {
-    systemctl restart realm
-    echo -e "${GREEN}Realm 已重启。${RESET}"
-}
-
-# 解析 endpoints 块起始行号数组
+# ---------------------------
+# Rules parsing/printing
+# ---------------------------
 get_endpoint_line_numbers() {
     if [ ! -f "$CONFIG_FILE" ]; then
         echo ""
@@ -195,10 +222,9 @@ print_rules_pretty() {
         local START END BLOCK NAME LISTEN REMOTE TYPE
         START=${RULES[$i]}
         END=${RULES[$((i+1))]:-99999}
-
         BLOCK=$(sed -n "$START,$((END-1))p" "$CONFIG_FILE")
 
-        NAME=$(echo "$BLOCK" | grep -m1 '^name'   | cut -d'"' -f2)
+        NAME=$(echo "$BLOCK" | grep -m1 '^name'    | cut -d'"' -f2)
         LISTEN=$(echo "$BLOCK" | grep -m1 'listen' | cut -d'"' -f2)
         REMOTE=$(echo "$BLOCK" | grep -m1 'remote' | cut -d'"' -f2)
         TYPE=$(echo "$BLOCK"   | grep -m1 'type'   | cut -d'"' -f2)
@@ -207,10 +233,13 @@ print_rules_pretty() {
     done
 }
 
+# ---------------------------
+# Rule operations (silent restart)
+# ---------------------------
 add_rule() {
     ensure_config_file
 
-    read -p "请输入规则名称（用于区分）: " NAME
+    read -p "请输入规则名称: " NAME
     read -p "请输入监听端口: " LISTEN
     read -p "请输入远程目标 IP:PORT: " REMOTE
 
@@ -218,7 +247,6 @@ add_rule() {
         echo -e "${RED}规则名称不能为空。${RESET}"
         return
     fi
-
     if ! [[ "$LISTEN" =~ ^[0-9]+$ ]]; then
         echo -e "${RED}监听端口必须是数字。${RESET}"
         return
@@ -233,8 +261,8 @@ remote = "$REMOTE"
 type   = "tcp+udp"
 EOF
 
-    restart_realm
-    echo -e "${GREEN}已添加规则 [$NAME] 并重启 Realm。${RESET}"
+    restart_realm_silent
+    echo -e "${GREEN}已添加规则 [$NAME] 并已应用。${RESET}"
 }
 
 delete_rule() {
@@ -248,7 +276,6 @@ delete_rule() {
         return
     fi
 
-    # 统一展示风格
     print_rules_pretty || return
 
     read -p "请输入要删除的规则编号: " IDX
@@ -264,19 +291,96 @@ delete_rule() {
     END=${RULES[$((IDX+1))]:-99999}
 
     sed -i "$START,$((END-1))d" "$CONFIG_FILE"
-    restart_realm
-    echo -e "${GREEN}规则已删除并重启 Realm。${RESET}"
+    restart_realm_silent
+    echo -e "${GREEN}规则已删除并已应用。${RESET}"
 }
 
 clear_rules() {
     ensure_config_file
     sed -i '/\[\[endpoints\]\]/,/^$/d' "$CONFIG_FILE"
-    restart_realm
-    echo -e "${GREEN}已清空所有规则并重启 Realm。${RESET}"
+    restart_realm_silent
+    echo -e "${GREEN}已清空所有规则并已应用。${RESET}"
 }
 
 list_rules() {
     print_rules_pretty || true
+}
+
+# 修改规则：名字/监听端口/remote
+edit_rule() {
+    ensure_config_file
+
+    mapfile -t RULES < <(get_endpoint_line_numbers)
+    local COUNT=${#RULES[@]}
+
+    if [ "$COUNT" -eq 0 ]; then
+        echo -e "${RED}当前没有任何转发规则可修改。${RESET}"
+        return
+    fi
+
+    print_rules_pretty || return
+
+    read -p "请输入要修改的规则编号: " IDX
+    IDX=$((IDX-1))
+    if [ "$IDX" -lt 0 ] || [ "$IDX" -ge "$COUNT" ]; then
+        echo -e "${RED}编号无效。${RESET}"
+        return
+    fi
+
+    local START END BLOCK
+    START=${RULES[$IDX]}
+    END=${RULES[$((IDX+1))]:-99999}
+    BLOCK=$(sed -n "$START,$((END-1))p" "$CONFIG_FILE")
+
+    local CUR_NAME CUR_LISTEN CUR_REMOTE CUR_TYPE
+    CUR_NAME=$(echo "$BLOCK" | grep -m1 '^name'    | cut -d'"' -f2)
+    CUR_LISTEN=$(echo "$BLOCK" | grep -m1 'listen' | cut -d'"' -f2)
+    CUR_REMOTE=$(echo "$BLOCK" | grep -m1 'remote' | cut -d'"' -f2)
+    CUR_TYPE=$(echo "$BLOCK"   | grep -m1 'type'   | cut -d'"' -f2)
+
+    echo -e "${GREEN}选中规则：${RESET}$((IDX+1)). [${CUR_NAME:-未命名}] ${CUR_LISTEN:-?} -> ${CUR_REMOTE:-?} (${CUR_TYPE:-?})"
+    echo "要修改哪个字段？"
+    echo "1. 名称 name"
+    echo "2. 监听 listen（端口）"
+    echo "3. 远程 remote（IP:PORT）"
+    echo "0. 返回"
+    read -p "请选择 [0-3]: " OPT
+
+    case "$OPT" in
+        1)
+            read -p "请输入新名称: " NEW
+            if [ -z "$NEW" ]; then
+                echo -e "${RED}名称不能为空。${RESET}"
+                return
+            fi
+            if echo "$BLOCK" | grep -q '^name'; then
+                sed -i "${START},$((END-1))s|^name[[:space:]]*=.*|name   = \"${NEW}\"|g" "$CONFIG_FILE"
+            else
+                sed -i "${START}a name   = \"${NEW}\"" "$CONFIG_FILE"
+            fi
+            ;;
+        2)
+            read -p "请输入新监听端口: " NEWP
+            if ! [[ "$NEWP" =~ ^[0-9]+$ ]]; then
+                echo -e "${RED}端口必须是数字。${RESET}"
+                return
+            fi
+            sed -i "${START},$((END-1))s|^listen[[:space:]]*=.*|listen = \"0.0.0.0:${NEWP}\"|g" "$CONFIG_FILE"
+            ;;
+        3)
+            read -p "请输入新远程目标（IP:PORT 或 域名:PORT）: " NEWR
+            if [ -z "$NEWR" ]; then
+                echo -e "${RED}remote 不能为空。${RESET}"
+                return
+            fi
+            sed -i "${START},$((END-1))s|^remote[[:space:]]*=.*|remote = \"${NEWR}\"|g" "$CONFIG_FILE"
+            ;;
+        0) return ;;
+        *) echo -e "${RED}无效选项。${RESET}"; return ;;
+    esac
+
+    restart_realm_silent
+    echo -e "${GREEN}规则已修改并已应用。${RESET}"
 }
 
 view_log() {
@@ -292,6 +396,8 @@ main_menu() {
     check_root
     while true; do
         echo -e "${GREEN}===== Realm TCP+UDP 转发脚本 =====${RESET}"
+        get_status_line
+        echo "----------------------------------"
         echo "1. 安装 Realm"
         echo "2. 卸载 Realm"
         echo "3. 重启 Realm"
@@ -300,20 +406,22 @@ main_menu() {
         echo "5. 删除单条规则"
         echo "6. 删除全部规则"
         echo "7. 查看当前规则"
-        echo "8. 查看日志"
-        echo "9. 查看配置"
+        echo "8. 修改某条规则
+        echo "9. 查看日志"
+        echo "10. 查看配置"
         echo "0. 退出"
-        read -p "请选择一个操作 [0-9]: " OPT
+        read -p "请选择一个操作 [0-10]: " OPT
         case $OPT in
             1) install_realm ;;
             2) uninstall_realm ;;
-            3) restart_realm ;;
+            3) restart_realm_verbose ;;
             4) add_rule ;;
             5) delete_rule ;;
             6) clear_rules ;;
             7) list_rules ;;
-            8) view_log ;;
-            9) view_config ;;
+            8) edit_rule ;;
+            9) view_log ;;
+            10) view_config ;;
             0) exit 0 ;;
             *) echo -e "${RED}无效选项。${RESET}" ;;
         esac
