@@ -884,9 +884,16 @@ manage_schedule_backup() {
   esac
 }
 
-# ---------------------------
-# Menu
-# ---------------------------
+install_ftp(){
+    clear
+    echo -e "${GREEN}📂 FTP/SFTP 备份工具...${RESET}"
+    echo -e "${YELLOW}默认 Realm 规则备份文件：${DEFAULT_EXPORT_FILE}${RESET}"
+    bash <(curl -L https://raw.githubusercontent.com/hiapb/ftp/main/back.sh)
+    sleep 2
+    exit 0
+}
+
+
 main_menu() {
   check_root
   while true; do
@@ -909,6 +916,7 @@ main_menu() {
     echo "12. 一键导出所有规则"
     echo "13. 一键导入所有规则"
     echo "14. 添加/删除定时备份任务"
+    echo "15. 自动备份到FTP/SFTP"
     echo "0.  退出"
     read -p "请选择一个操作 [0-14]: " OPT
 
@@ -928,6 +936,7 @@ main_menu() {
       12) require_installed && export_rules ;;
       13) require_installed && import_rules ;;
       14) manage_schedule_backup ;;
+      15) install_ftp ;;
       *) echo -e "${RED}无效选项。${RESET}" ;;
     esac
   done
