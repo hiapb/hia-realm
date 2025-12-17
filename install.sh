@@ -918,7 +918,7 @@ main_menu() {
     echo "14. 添加/删除定时备份任务"
     echo "15. 自动备份到FTP/SFTP"
     echo "0.  退出"
-    read -p "请选择一个操作 [0-14]: " OPT
+    read -p "请选择一个操作 [0-15]: " OPT
 
     case "$OPT" in
       1) install_realm ;;
