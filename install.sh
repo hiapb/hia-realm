@@ -8,6 +8,7 @@ TMP_DIR="/tmp/realm-install"
 
 EXPORT_DIR="/etc/realm"
 DEFAULT_EXPORT_FILE="/etc/realm/realm-rules.backup.toml"
+DEFAULT_IMPORT_FILE="/etc/realm/realm-rules.backup.toml"
 
 CRON_FILE="/etc/cron.d/realm-rules-export"
 EXPORT_HELPER="/usr/local/bin/realm-export-rules.sh"
@@ -47,42 +48,49 @@ require_installed() {
 }
 
 # ---------------------------
+# Config bootstrap
+# ---------------------------
+ensure_config_file() {
+  mkdir -p "$(dirname "$CONFIG_FILE")"
+  if [ ! -f "$CONFIG_FILE" ]; then
+    cat > "$CONFIG_FILE" <<EOF
+# 默认配置
+# 每条规则一个 [[endpoints]] 块
+# 本脚本支持自定义字段 name 用于区分规则（Realm 会忽略未知字段）
+# 暂停规则：脚本会把整段 endpoints 用 # 注释
+EOF
+  fi
+}
+
+# ---------------------------
 # Name validation (中文/字母/数字/_/-)
+# 你如果要“严格只允许中文字母数字”，把 _- 从正则里去掉即可
 # ---------------------------
 validate_name() {
   local name="$1"
   [ -z "$name" ] && return 1
 
-  # 长度 1-50
   local len
   len="$(printf "%s" "$name" | wc -m | tr -d ' ')"
   [ "$len" -lt 1 ] || [ "$len" -gt 50 ] && return 1
 
-  # UTF-8 校验（有 iconv 就做）
   if command -v iconv >/dev/null 2>&1; then
     printf "%s" "$name" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || return 1
   fi
 
-  # 控制字符检查（用 awk 的 [[:cntrl:]]，避免 grep 正则兼容问题）
+  # 控制字符检查：用 awk 避免 busybox grep 不兼容
   if printf "%s" "$name" | LC_ALL=C awk '{
         for(i=1;i<=length($0);i++){
           c=substr($0,i,1)
-          if (c ~ /[[:cntrl:]]/) { exit 1 }
+          if (c ~ /[[:cntrl:]]/) exit 1
         }
         exit 0
-      }'; then
-    : 
-  else
-    return 1
-  fi
+      }'; then :; else return 1; fi
 
-  # 仅允许：中文(一-龥)、字母数字、_、-
-  # 用 awk 做，避免 grep “Invalid regular expression”
+  # 仅允许：中文/字母/数字/_/-
   printf "%s" "$name" | awk '
     BEGIN{ok=1}
-    {
-      if ($0 ~ /[^0-9A-Za-z_一-龥-]/) ok=0
-    }
+    { if ($0 ~ /[^0-9A-Za-z_一-龥-]/) ok=0 }
     END{exit ok?0:1}
   ' || return 1
 
@@ -90,61 +98,37 @@ validate_name() {
 }
 
 # ---------------------------
-# Port in use check (ss/netstat)
+# Service helpers
 # ---------------------------
-port_in_use() {
-  local port="$1"
-
-  if command -v ss >/dev/null 2>&1; then
-    # 取本地地址列，匹配 :port 结尾（兼容 [::]:port / 0.0.0.0:port）
-    ss -H -lntu 2>/dev/null | awk '{print $4}' | awk -v p=":$port" '
-      $0 ~ (p"$") {found=1}
-      END{exit found?0:1}
-    '
-    return $?
-  fi
-
-  if command -v netstat >/dev/null 2>&1; then
-    netstat -lntu 2>/dev/null | awk '{print $4}' | awk -v p=":$port" '
-      $0 ~ (p"$") {found=1}
-      END{exit found?0:1}
-    '
-    return $?
-  fi
-
-  # 没工具就不阻塞
-  echo -e "${YELLOW}提示：未检测到 ss/netstat，无法检查端口占用。${RESET}" >&2
-  return 1
+restart_realm_silent() {
+  systemctl restart realm >/dev/null 2>&1 || systemctl restart realm
 }
 
-prompt_listen_port_checked() {
-  local except_port="${1:-}"
-  local p=""
-  while true; do
-    read -p "请输入监听端口: " p
-    if ! [[ "$p" =~ ^[0-9]+$ ]]; then
-      echo -e "${RED}监听端口必须是数字。${RESET}"
-      continue
-    fi
-    if [ "$p" -lt 1 ] || [ "$p" -gt 65535 ]; then
-      echo -e "${RED}端口范围必须是 1-65535。${RESET}"
-      continue
-    fi
+restart_realm_verbose() {
+  systemctl restart realm
+  echo -e "${GREEN}Realm 已重启。${RESET}"
+}
 
-    # 编辑：允许保持原端口
-    if [ -n "$except_port" ] && [ "$p" = "$except_port" ]; then
-      echo "$p"
-      return 0
-    fi
+get_realm_version_short() {
+  local raw ver
+  raw="$($REALM_BIN --version 2>/dev/null || true)"
+  ver="$(echo "$raw" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]/){print $i; exit}}')"
+  [ -z "$ver" ] && echo "未知" || echo "$ver"
+}
 
-    if port_in_use "$p"; then
-      echo -e "${RED}端口 $p 已被占用，请重新输入。${RESET}"
-      continue
-    fi
-
-    echo "$p"
-    return 0
-  done
+get_status_line() {
+  if ! is_installed; then
+    echo -e "状态：${YELLOW}未安装${RESET}"
+    return
+  fi
+  local status ver
+  status="$(systemctl is-active realm 2>/dev/null || true)"
+  ver="$(get_realm_version_short)"
+  if [ "$status" = "active" ]; then
+    echo -e "状态：${GREEN}运行中${RESET}  |  版本：${GREEN}${ver}${RESET}"
+  else
+    echo -e "状态：${RED}未运行${RESET}  |  版本：${GREEN}${ver}${RESET}"
+  fi
 }
 
 # ---------------------------
@@ -197,54 +181,6 @@ get_latest_realm_url() {
     | grep browser_download_url \
     | grep "$file" \
     | cut -d '"' -f 4
-}
-
-ensure_config_file() {
-  mkdir -p "$(dirname "$CONFIG_FILE")"
-  if [ ! -f "$CONFIG_FILE" ]; then
-    cat > "$CONFIG_FILE" <<EOF
-# 默认配置
-# 每条规则一个 [[endpoints]] 块
-# 本脚本支持自定义字段 name 用于区分规则（Realm 会忽略未知字段）
-# 暂停规则：脚本会把整段 endpoints 用 # 注释
-EOF
-  fi
-}
-
-# ---------------------------
-# Service helpers
-# ---------------------------
-restart_realm_silent() {
-  systemctl restart realm >/dev/null 2>&1 || systemctl restart realm
-}
-
-restart_realm_verbose() {
-  systemctl restart realm
-  echo -e "${GREEN}Realm 已重启。${RESET}"
-}
-
-get_realm_version_short() {
-  local raw ver
-  raw="$($REALM_BIN --version 2>/dev/null || true)"
-  ver="$(echo "$raw" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]/){print $i; exit}}')"
-  [ -z "$ver" ] && echo "未知" || echo "$ver"
-}
-
-get_status_line() {
-  if ! is_installed; then
-    echo -e "状态：${YELLOW}未安装${RESET}"
-    return
-  fi
-
-  local status ver
-  status="$(systemctl is-active realm 2>/dev/null || true)"
-  ver="$(get_realm_version_short)"
-
-  if [ "$status" = "active" ]; then
-    echo -e "状态：${GREEN}运行中${RESET}  |  版本：${GREEN}${ver}${RESET}"
-  else
-    echo -e "状态：${RED}未运行${RESET}  |  版本：${GREEN}${ver}${RESET}"
-  fi
 }
 
 # ---------------------------
@@ -413,48 +349,32 @@ print_rules_pretty() {
 }
 
 # ---------------------------
-# Safe edit (no sed replace)
+# TOML safe escape (minimal)
 # ---------------------------
 escape_toml() {
-  # 只转义 \ 和 "
-  printf "%s" "$1" | awk '{
-    gsub(/\\/,"\\\\"); gsub(/"/,"\\\"");
-    print
-  }'
-}
-
-apply_block_key_update() {
-  # args: start end enabled key value
-  local start="$1" end="$2" enabled="$3" key="$4" value="$5"
-  local tmp="${CONFIG_FILE}.tmp.$$"
-  local prefix=""
-  [ "$enabled" -eq 0 ] && prefix="# "
-
-  awk -v S="$start" -v E="$end" -v K="$key" -v V="$value" -v PFX="$prefix" '
-    function is_key_line(line, key) {
-      return line ~ "^[[:space:]]*(#[[:space:]]*)?" key "[[:space:]]*="
-    }
-    BEGIN{found=0}
-    {
-      if (NR>=S && NR<=E-1) {
-        if (!found && is_key_line($0, K)) {
-          print PFX K " = \"" V "\""
-          found=1
-          next
-        }
-      }
-      print $0
-      if (NR>=S && NR<=E-1 && $0 ~ "^[[:space:]]*$" && !found) {
-        print PFX K " = \"" V "\""
-        found=1
-      }
-    }
-  ' "$CONFIG_FILE" > "$tmp"
-  mv "$tmp" "$CONFIG_FILE"
+  printf "%s" "$1" | awk '{gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); print}'
 }
 
 # ---------------------------
-# IPv6 / prompts (stdout only returns value)
+# Listen helpers
+# ---------------------------
+listen_mode_from_value() {
+  local v="$1"
+  [[ "$v" == \[*\]* ]] && echo "v6" || echo "v4"
+}
+
+get_port_from_listen() {
+  local v="$1"
+  echo "${v##*:}"
+}
+
+replace_listen_port_keep_proto() {
+  local listen="$1" newp="$2"
+  echo "${listen%:*}:$newp"
+}
+
+# ---------------------------
+# IPv6 check
 # ---------------------------
 has_ipv6() {
   command -v ip >/dev/null 2>&1 || return 1
@@ -486,21 +406,128 @@ choose_listen_mode_v4v6() {
   done
 }
 
-listen_mode_from_value() {
-  local v="$1"
-  [[ "$v" == \[*\]* ]] && echo "v6" || echo "v4"
+# ---------------------------
+# Port checks
+# 1) 先查“配置冲突”（最重要、最可靠）
+# 2) 再查“系统占用”（可选）
+# ---------------------------
+config_port_conflict() {
+  # args: mode(v4/v6) port exclude_index(0-based or empty)
+  local mode="$1" port="$2" exclude="${3:-}"
+  build_rules_index
+  local i listen p m
+  for ((i=0; i<${#RULE_LISTENS[@]}; i++)); do
+    if [ -n "$exclude" ] && [ "$i" -eq "$exclude" ]; then
+      continue
+    fi
+    listen="${RULE_LISTENS[$i]}"
+    m="$(listen_mode_from_value "$listen")"
+    p="$(get_port_from_listen "$listen")"
+    if [ "$m" = "$mode" ] && [ "$p" = "$port" ]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
-get_port_from_listen() {
-  local v="$1"
-  echo "${v##*:}"
+port_in_use_system() {
+  local port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -H -lntu 2>/dev/null | awk '{print $4}' | awk -v p=":$port" '
+      $0 ~ (p"$") {found=1}
+      END{exit found?0:1}
+    '
+    return $?
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -lntu 2>/dev/null | awk '{print $4}' | awk -v p=":$port" '
+      $0 ~ (p"$") {found=1}
+      END{exit found?0:1}
+    '
+    return $?
+  fi
+  return 1
 }
 
-replace_listen_port_keep_proto() {
-  local listen="$1" newp="$2"
-  echo "${listen%:*}:$newp"
+prompt_listen_port_checked() {
+  # args: mode exclude_index(0-based or empty) except_port(optional)
+  local mode="$1"
+  local exclude="${2:-}"
+  local except_port="${3:-}"
+  local p=""
+
+  while true; do
+    read -p "请输入监听端口: " p
+    if ! [[ "$p" =~ ^[0-9]+$ ]]; then
+      echo -e "${RED}监听端口必须是数字。${RESET}"
+      continue
+    fi
+    if [ "$p" -lt 1 ] || [ "$p" -gt 65535 ]; then
+      echo -e "${RED}端口范围必须是 1-65535。${RESET}"
+      continue
+    fi
+
+    # 编辑：允许保持原端口
+    if [ -n "$except_port" ] && [ "$p" = "$except_port" ]; then
+      echo "$p"
+      return 0
+    fi
+
+    # ① 配置冲突（必拦）
+    if config_port_conflict "$mode" "$p" "$exclude"; then
+      echo -e "${RED}端口 $p 已被其它规则占用（配置冲突），请重新输入。${RESET}"
+      continue
+    fi
+
+    # ② 系统占用（尽量提示）
+    if port_in_use_system "$p"; then
+      echo -e "${YELLOW}提示：系统检测到端口 $p 正在被占用（可能是其它服务）。建议换端口。${RESET}"
+      read -p "仍然使用该端口吗？[y/N]: " ANS
+      case "$ANS" in
+        y|Y) echo "$p"; return 0 ;;
+        *) continue ;;
+      esac
+    fi
+
+    echo "$p"
+    return 0
+  done
 }
 
+# ---------------------------
+# Block update (awk safe)
+# ---------------------------
+apply_block_key_update() {
+  # args: start end enabled key value
+  local start="$1" end="$2" enabled="$3" key="$4" value="$5"
+  local tmp="${CONFIG_FILE}.tmp.$$"
+  local prefix=""
+  [ "$enabled" -eq 0 ] && prefix="# "
+
+  awk -v S="$start" -v E="$end" -v K="$key" -v V="$value" -v PFX="$prefix" '
+    function is_key_line(line, key) { return line ~ "^[[:space:]]*(#[[:space:]]*)?" key "[[:space:]]*=" }
+    BEGIN{found=0}
+    {
+      if (NR>=S && NR<=E-1) {
+        if (!found && is_key_line($0, K)) {
+          print PFX K " = \"" V "\""
+          found=1
+          next
+        }
+      }
+      print $0
+      if (NR>=S && NR<=E-1 && $0 ~ "^[[:space:]]*$" && !found) {
+        print PFX K " = \"" V "\""
+        found=1
+      }
+    }
+  ' "$CONFIG_FILE" > "$tmp"
+  mv "$tmp" "$CONFIG_FILE"
+}
+
+# ---------------------------
+# Remote input
+# ---------------------------
 prompt_remote_by_mode() {
   local MODE="$1"
   local REMOTE=""
@@ -518,17 +545,14 @@ prompt_remote_by_mode() {
         echo -e "${RED}你选择了 IPv4，但输入像裸 IPv6。请重输。${RESET}" >&2
         continue
       fi
-
       echo "$REMOTE"; return 0
     else
       echo -e "${GREEN}远程目标(v6)：[IPv6]:PORT  例：[2001:db8::1]:443${RESET}" >&2
       read -r -p "请输入远程目标: " REMOTE
       [ -z "$REMOTE" ] && { echo -e "${RED}远程目标不能为空。${RESET}" >&2; continue; }
 
-      echo "$REMOTE" | awk '
-        $0 ~ /^\[[0-9A-Fa-f:]+\]:[0-9]+$/ {ok=1}
-        END{exit ok?0:1}
-      ' || { echo -e "${RED}IPv6 格式必须是 [IPv6]:PORT，请重输。${RESET}" >&2; continue; }
+      echo "$REMOTE" | awk '$0 ~ /^\[[0-9A-Fa-f:]+\]:[0-9]+$/ {ok=1} END{exit ok?0:1}' \
+        || { echo -e "${RED}IPv6 格式必须是 [IPv6]:PORT，请重输。${RESET}" >&2; continue; }
 
       echo "$REMOTE"; return 0
     fi
@@ -552,7 +576,7 @@ add_rule() {
   done
 
   local LISTEN
-  LISTEN="$(prompt_listen_port_checked)"
+  LISTEN="$(prompt_listen_port_checked "$MODE" "" "")"
 
   local REMOTE
   REMOTE="$(prompt_remote_by_mode "$MODE")"
@@ -658,7 +682,9 @@ edit_rule() {
       ;;
     2)
       local NEWP
-      NEWP="$(prompt_listen_port_checked "$CUR_PORT")"
+      # 这里会排除当前规则 IDX，并且 except_port=CUR_PORT 允许原样不变
+      NEWP="$(prompt_listen_port_checked "$CUR_MODE" "$IDX" "$CUR_PORT")"
+
       local NEW_LISTEN
       NEW_LISTEN="$(replace_listen_port_keep_proto "$CUR_LISTEN" "$NEWP")"
       apply_block_key_update "$START" "$END" "$ENABLED" "listen" "$NEW_LISTEN"
@@ -736,9 +762,11 @@ export_rules() {
 
 import_rules() {
   ensure_config_file
-  read -p "请输入要导入的文件路径: " IN
+  read -p "请输入要导入的文件路径 [${DEFAULT_IMPORT_FILE}]: " IN
+  IN="${IN:-$DEFAULT_IMPORT_FILE}"
+
   if [ -z "$IN" ] || [ ! -f "$IN" ]; then
-    echo -e "${RED}导入文件不存在。${RESET}"
+    echo -e "${RED}导入文件不存在：$IN${RESET}"
     return
   fi
   if ! grep -q -E '^[[:space:]]*(#\s*)?\[\[endpoints\]\]' "$IN"; then
@@ -769,7 +797,7 @@ EOF
 }
 
 # ---------------------------
-# Cron schedule (14)
+# Cron schedule (14) - unchanged from你的需求
 # ---------------------------
 has_cron() {
   command -v crontab >/dev/null 2>&1 && return 0
@@ -981,11 +1009,11 @@ main_menu() {
       7) require_installed && list_rules ;;
       8) require_installed && edit_rule ;;
       9) require_installed && toggle_rule ;;
+      10) require_installed && journalctl -u realm --no-pager --since "1 hour ago" ;;
+      11) require_installed && cat "$CONFIG_FILE" ;;
       12) require_installed && export_rules ;;
       13) require_installed && import_rules ;;
       14) manage_schedule_backup ;;
-      10) require_installed && journalctl -u realm --no-pager --since "1 hour ago" ;;
-      11) require_installed && cat "$CONFIG_FILE" ;;
       *) echo -e "${RED}无效选项。${RESET}" ;;
     esac
   done
