@@ -396,21 +396,22 @@ has_ipv6() {
 
 choose_listen_mode_v4v6() {
   while true; do
-    echo "请选择监听协议："
-    echo "1. IPv4（0.0.0.0:PORT）【默认】"
-    echo "2. IPv6（[::]:PORT）"
+    echo "请选择监听协议：" >&2
+    echo "1. IPv4（0.0.0.0:PORT）【默认】" >&2
+    echo "2. IPv6（[::]:PORT）" >&2
     read -p "请选择 [1-2]（默认 1）: " MODE
     MODE="${MODE:-1}"
+
     case "$MODE" in
       1) echo "v4"; return 0 ;;
       2)
         if has_ipv6; then
           echo "v6"; return 0
         else
-          echo -e "${RED}检测到本机没有可用 IPv6（可能未开通或被禁用）。请改选 IPv4。${RESET}"
+          echo -e "${RED}检测到本机没有可用 IPv6（可能未开通或被禁用）。请改选 IPv4。${RESET}" >&2
         fi
         ;;
-      *) echo -e "${RED}无效选项，请重新选择。${RESET}" ;;
+      *) echo -e "${RED}无效选项，请重新选择。${RESET}" >&2 ;;
     esac
   done
 }
@@ -432,28 +433,36 @@ replace_listen_port_keep_proto() {
 prompt_remote_by_mode() {
   local MODE="$1"
   local REMOTE=""
+
   while true; do
     if [ "$MODE" = "v4" ]; then
-      echo -e "${GREEN}请输入远程目标（v4 格式）：IPv4/域名:PORT  例如：1.2.3.4:443 或 example.com:443${RESET}"
+      echo -e "${GREEN}请输入远程目标（v4 格式）：IPv4/域名:PORT  例如：1.2.3.4:443 或 example.com:443${RESET}" >&2
       read -r -p "remote: " REMOTE
-      [ -z "$REMOTE" ] && { echo -e "${RED}remote 不能为空。${RESET}"; continue; }
+      [ -z "$REMOTE" ] && { echo -e "${RED}remote 不能为空。${RESET}" >&2; continue; }
+
+      # v4：禁止 [IPv6]:PORT
       if [[ "$REMOTE" == \[*\]:* ]]; then
-        echo -e "${RED}你选择的是 IPv4，但输入看起来是 IPv6（带 []）。请按 IPv4/域名:PORT 重输。${RESET}"
+        echo -e "${RED}你选择的是 IPv4，但输入看起来是 IPv6（带 []）。请按 IPv4/域名:PORT 重输。${RESET}" >&2
         continue
       fi
+      # v4：禁止裸 IPv6（包含 : 且没有 .）
       if [[ "$REMOTE" == *:* && "$REMOTE" != *"."* ]]; then
-        echo -e "${RED}你选择的是 IPv4，但输入看起来是裸 IPv6。请按 IPv4/域名:PORT 重输。${RESET}"
+        echo -e "${RED}你选择的是 IPv4，但输入看起来是裸 IPv6。请按 IPv4/域名:PORT 重输。${RESET}" >&2
         continue
       fi
-      echo "$REMOTE"; return 0
+
+      echo "$REMOTE"
+      return 0
     else
-      echo -e "${GREEN}请输入远程目标（v6 格式）：[IPv6]:PORT  例如：[2001:db8::1]:443${RESET}"
+      echo -e "${GREEN}请输入远程目标（v6 格式）：[IPv6]:PORT  例如：[2001:db8::1]:443${RESET}" >&2
       read -r -p "remote: " REMOTE
-      [ -z "$REMOTE" ] && { echo -e "${RED}remote 不能为空。${RESET}"; continue; }
+      [ -z "$REMOTE" ] && { echo -e "${RED}remote 不能为空。${RESET}" >&2; continue; }
+
       if [[ "$REMOTE" =~ ^\[[0-9a-fA-F:]+\]:[0-9]+$ ]]; then
-        echo "$REMOTE"; return 0
+        echo "$REMOTE"
+        return 0
       else
-        echo -e "${RED}IPv6 格式不正确，必须是 [IPv6]:PORT（带方括号）。请重输。${RESET}"
+        echo -e "${RED}IPv6 格式不正确，必须是 [IPv6]:PORT（带方括号）。请重输。${RESET}" >&2
       fi
     fi
   done
