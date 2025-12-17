@@ -1,8 +1,9 @@
 #!/bin/bash
+set -e
+
 CONFIG_FILE="/etc/realm/config.toml"
 REALM_BIN="/usr/local/bin/realm"
 SERVICE_FILE="/etc/systemd/system/realm.service"
-REALM_URL="https://github.com/zhboner/realm/releases/download/v2.9.2/realm-x86_64-unknown-linux-musl.tar.gz"
 TMP_DIR="/tmp/realm-install"
 
 GREEN="\e[32m"
@@ -16,15 +17,117 @@ check_root() {
     fi
 }
 
+need_cmd() {
+    command -v "$1" >/dev/null 2>&1 || {
+        echo -e "${RED}缺少依赖命令：$1，请先安装。${RESET}"
+        exit 1
+    }
+}
+
+get_arch() {
+    local arch
+    arch="$(uname -m)"
+    case "$arch" in
+        x86_64) echo "x86_64" ;;
+        aarch64|arm64) echo "aarch64" ;;
+        armv7l) echo "armv7" ;;
+        armv6l) echo "armv7" ;; # 尽量兼容
+        *) echo "unsupported" ;;
+    esac
+}
+
+get_libc() {
+    # musl: Alpine/部分OpenWRT; gnu: Debian/Ubuntu/CentOS...
+    if ldd --version 2>&1 | grep -qi musl; then
+        echo "musl"
+    else
+        echo "gnu"
+    fi
+}
+
+get_realm_filename() {
+    local arch libc
+    arch="$(get_arch)"
+    libc="$(get_libc)"
+
+    case "$arch" in
+        x86_64)
+            echo "realm-x86_64-unknown-linux-$libc.tar.gz"
+            ;;
+        aarch64)
+            echo "realm-aarch64-unknown-linux-$libc.tar.gz"
+            ;;
+        armv7)
+            # 32位 ARM：官方文件名里是 armv7 + (gnu|musl) + eabihf
+            if [ "$libc" = "musl" ]; then
+                echo "realm-armv7-unknown-linux-musleabihf.tar.gz"
+            else
+                echo "realm-armv7-unknown-linux-gnueabihf.tar.gz"
+            fi
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
+get_latest_realm_url() {
+    local file
+    file="$(get_realm_filename)"
+    if [ -z "$file" ]; then
+        return 1
+    fi
+
+    # 取 latest release 中匹配的平台包
+    curl -s https://api.github.com/repos/zhboner/realm/releases/latest \
+      | grep browser_download_url \
+      | grep "$file" \
+      | cut -d '"' -f 4
+}
+
 install_realm() {
-    echo -e "${GREEN}正在安装 Realm TCP+UDP转发脚本...${RESET}"
+    need_cmd curl
+    need_cmd tar
+    need_cmd systemctl
+
+    echo -e "${GREEN}正在安装 Realm TCP+UDP 转发...${RESET}"
+
+    local arch libc file url
+    arch="$(get_arch)"
+    libc="$(get_libc)"
+    file="$(get_realm_filename)"
+
+    if [ "$arch" = "unsupported" ] || [ -z "$file" ]; then
+        echo -e "${RED}不支持的架构：$(uname -m)${RESET}"
+        exit 1
+    fi
+
+    url="$(get_latest_realm_url || true)"
+    if [ -z "$url" ]; then
+        echo -e "${RED}获取 Realm 最新版本下载地址失败。可能是网络/限流或 release 中无对应包：$file${RESET}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}检测到架构：$arch  libc：$libc${RESET}"
+    echo -e "${GREEN}将下载：$file${RESET}"
+    echo -e "${GREEN}下载地址：$url${RESET}"
+
     mkdir -p "$TMP_DIR"
     cd "$TMP_DIR" || exit 1
-    curl -L -o realm.tar.gz "$REALM_URL"
+    rm -f realm.tar.gz realm
+
+    curl -L -o realm.tar.gz "$url"
     tar -xzf realm.tar.gz
+
+    if [ ! -f "realm" ]; then
+        echo -e "${RED}解压后未找到 realm 可执行文件，请检查压缩包内容。${RESET}"
+        exit 1
+    fi
+
     mv realm "$REALM_BIN"
     chmod +x "$REALM_BIN"
 
+    # systemd service
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Realm Proxy
@@ -39,18 +142,25 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 EOF
 
-    mkdir -p $(dirname "$CONFIG_FILE")
-    echo "# 默认配置" > "$CONFIG_FILE"
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    if [ ! -f "$CONFIG_FILE" ]; then
+        cat > "$CONFIG_FILE" <<EOF
+# 默认配置
+# 添加规则会自动追加 [[endpoints]] 块
+EOF
+    fi
 
     systemctl daemon-reexec
-    systemctl enable realm
+    systemctl enable realm >/dev/null 2>&1 || true
     systemctl restart realm
+
     echo -e "${GREEN}Realm 安装完成。${RESET}"
+    echo -e "${GREEN}Realm 版本信息：$($REALM_BIN --version 2>/dev/null || echo '未知')${RESET}"
 }
 
 uninstall_realm() {
-    systemctl stop realm
-    systemctl disable realm
+    systemctl stop realm >/dev/null 2>&1 || true
+    systemctl disable realm >/dev/null 2>&1 || true
     rm -f "$REALM_BIN" "$SERVICE_FILE" "$CONFIG_FILE"
     systemctl daemon-reexec
     echo -e "${GREEN}Realm 已卸载。${RESET}"
@@ -64,6 +174,12 @@ restart_realm() {
 add_rule() {
     read -p "请输入监听端口: " LISTEN
     read -p "请输入远程目标 IP:PORT: " REMOTE
+
+    if ! [[ "$LISTEN" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}监听端口必须是数字。${RESET}"
+        return
+    fi
+
     cat >> "$CONFIG_FILE" <<EOF
 
 [[endpoints]]
@@ -71,46 +187,69 @@ listen = "0.0.0.0:$LISTEN"
 remote = "$REMOTE"
 type = "tcp+udp"
 EOF
+
     restart_realm
     echo -e "${GREEN}已添加规则并重启 Realm。${RESET}"
 }
 
 delete_rule() {
-    RULES=($(grep -n '\[\[endpoints\]\]' "$CONFIG_FILE" | cut -d: -f1))
-    COUNT=${#RULES[@]}
-    if [ "$COUNT" -eq 0 ]; then
-        echo "${RED}无可删除规则。${RESET}"
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo -e "${RED}配置文件不存在：$CONFIG_FILE${RESET}"
         return
     fi
+
+    mapfile -t RULES < <(grep -n '\[\[endpoints\]\]' "$CONFIG_FILE" | cut -d: -f1)
+    COUNT=${#RULES[@]}
+
+    if [ "$COUNT" -eq 0 ]; then
+        echo -e "${RED}无可删除规则。${RESET}"
+        return
+    fi
+
     echo "当前转发规则："
     for ((i=0; i<COUNT; i++)); do
         START=${RULES[$i]}
         END=${RULES[$((i+1))]:-99999}
         BLOCK=$(sed -n "$START,$((END-1))p" "$CONFIG_FILE")
-        echo -e "$((i+1)). $(echo "$BLOCK" | grep listen | cut -d'"' -f2) -> $(echo "$BLOCK" | grep remote | cut -d'"' -f2)"
+        L=$(echo "$BLOCK" | grep -m1 listen | cut -d'"' -f2)
+        R=$(echo "$BLOCK" | grep -m1 remote | cut -d'"' -f2)
+        echo -e "$((i+1)). ${L:-?} -> ${R:-?}"
     done
+
     read -p "请输入要删除的规则编号: " IDX
     IDX=$((IDX-1))
+
     if [ "$IDX" -lt 0 ] || [ "$IDX" -ge "$COUNT" ]; then
-        echo "${RED}编号无效。${RESET}"
+        echo -e "${RED}编号无效。${RESET}"
         return
     fi
+
     START=${RULES[$IDX]}
     END=${RULES[$((IDX+1))]:-99999}
+
     sed -i "$START,$((END-1))d" "$CONFIG_FILE"
     restart_realm
     echo -e "${GREEN}规则已删除并重启 Realm。${RESET}"
 }
 
 clear_rules() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo -e "${RED}配置文件不存在：$CONFIG_FILE${RESET}"
+        return
+    fi
+    # 删除 [[endpoints]] 到空行的块
     sed -i '/\[\[endpoints\]\]/,/^$/d' "$CONFIG_FILE"
     restart_realm
     echo -e "${GREEN}已清空所有规则并重启 Realm。${RESET}"
 }
 
 list_rules() {
-    echo "${GREEN}当前转发规则：${RESET}"
-    grep -A3 '\[\[endpoints\]\]' "$CONFIG_FILE" | sed '/^--$/d'
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo -e "${RED}配置文件不存在：$CONFIG_FILE${RESET}"
+        return
+    fi
+    echo -e "${GREEN}当前转发规则：${RESET}"
+    grep -A3 '\[\[endpoints\]\]' "$CONFIG_FILE" | sed '/^--$/d' || true
 }
 
 view_log() {
@@ -118,6 +257,10 @@ view_log() {
 }
 
 view_config() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo -e "${RED}配置文件不存在：$CONFIG_FILE${RESET}"
+        return
+    fi
     cat "$CONFIG_FILE"
 }
 
