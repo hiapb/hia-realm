@@ -40,7 +40,7 @@ if [ ! -f "$REALM_BIN" ]; then
 fi
 mkdir -p /etc/realm
 
-# 3. 编写代码 (极致轻量版)
+# 3. 编写代码 
 mkdir -p "$WORK_DIR/src"
 cd "$WORK_DIR"
 
