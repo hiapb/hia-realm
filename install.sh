@@ -247,12 +247,18 @@ install_realm() {
 }
 
 uninstall_realm() {
+  echo -e "${YELLOW}正在卸载 Realm 面板...${RESET}"
+  bash <(curl -fsSL https://raw.githubusercontent.com/hiapb/hia-realm/main/unipan.sh)
+  # ------------------------------------------
+
+  echo -e "${YELLOW}正在卸载 Realm 主程序...${RESET}"
   systemctl stop realm >/dev/null 2>&1 || true
   systemctl disable realm >/dev/null 2>&1 || true
   rm -f "$REALM_BIN" "$SERVICE_FILE" "$CONFIG_FILE"
   systemctl daemon-reexec
-  echo -e "${GREEN}Realm 已卸载。${RESET}"
+  echo -e "${GREEN}Realm 及面板已全部卸载完成。${RESET}"
 }
+
 
 
 RULE_STARTS=()
@@ -892,6 +898,34 @@ install_ftp(){
     sleep 2
     exit 0
 }
+manage_panel() {
+    echo "--------------------"
+    echo "Realm 面板管理："
+    echo "1. 安装面板"
+    echo "2. 卸载面板"
+    echo "0. 返回"
+    read -p "请选择 [0-2]: " PAN_OPT
+
+    case "$PAN_OPT" in
+        1)
+            echo "--------------------"
+            echo "选择安装方式："
+            echo "1. 快速安装部署"
+            echo "2. 自编译部署"
+            echo "0. 返回"
+            read -p "请选择 [0-2]: " INST_OPT
+            case "$INST_OPT" in
+                1) bash <(curl -fsSL https://raw.githubusercontent.com/hiapb/hia-realm/main/quickpanel.sh) ;;
+                2) bash <(curl -fsSL https://raw.githubusercontent.com/hiapb/hia-realm/main/panel.sh) ;;
+                *) return ;;
+            esac
+            ;;
+        2)
+            bash <(curl -fsSL https://raw.githubusercontent.com/hiapb/hia-realm/main/unipan.sh)
+            ;;
+        *) return ;;
+    esac
+}
 
 
 main_menu() {
@@ -917,6 +951,7 @@ main_menu() {
     echo "13. 一键导入所有规则"
     echo "14. 添加/删除定时备份任务"
     echo "15. 自动备份到FTP/SFTP"
+    echo "16. Realm 面板管理" 
     echo "0.  退出"
     read -p "请选择一个操作 [0-15]: " OPT
 
@@ -937,6 +972,7 @@ main_menu() {
       13) require_installed && import_rules ;;
       14) require_installed && manage_schedule_backup ;;
       15) require_installed && install_ftp ;;
+      16) require_installed && manage_panel ;;  
       *) echo -e "${RED}无效选项。${RESET}" ;;
     esac
   done
