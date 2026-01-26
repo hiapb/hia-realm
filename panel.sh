@@ -48,7 +48,7 @@ fi
 
 clear
 echo -e "${GREEN}==========================================${RESET}"
-echo -e "${GREEN}Realm 面板 一键部署 ${RESET}"
+echo -e "${GREEN}Realm 面板 一键部署  ${RESET}"
 echo -e "${GREEN}==========================================${RESET}"
 
 # 1. 环境准备
@@ -103,7 +103,7 @@ cd "$WORK_DIR"
 cat > Cargo.toml <<EOF
 [package]
 name = "realm-panel"
-version = "3.3.8"
+version = "3.3.9"
 edition = "2021"
 
 [dependencies]
@@ -321,6 +321,13 @@ async fn get_rules(cookies: Cookies, State(state): State<Arc<AppState>>) -> Resp
 async fn add_rule(cookies: Cookies, State(state): State<Arc<AppState>>, Json(req): Json<AddRuleReq>) -> Response {
     let mut data = state.data.lock().unwrap();
     if !check_auth(&cookies, &data) { return StatusCode::UNAUTHORIZED.into_response(); }
+
+    let new_port = req.listen.split(':').last().unwrap_or("").trim();
+    if data.rules.iter().any(|r| r.listen.split(':').last().unwrap_or("").trim() == new_port) {
+        return Json(serde_json::json!({"status":"error", "message": "端口已被占用！"})).into_response();
+    }
+    // -------------------------
+
     data.rules.push(Rule { id: uuid::Uuid::new_v4().to_string(), name: req.name, listen: req.listen, remote: req.remote, enabled: true });
     save_json(&data); save_config_toml(&data);
     Json(serde_json::json!({"status":"ok"})).into_response()
@@ -341,6 +348,13 @@ async fn delete_rule(cookies: Cookies, State(state): State<Arc<AppState>>, Path(
 async fn update_rule(cookies: Cookies, State(state): State<Arc<AppState>>, Path(id): Path<String>, Json(req): Json<UpdateRuleReq>) -> Response {
     let mut data = state.data.lock().unwrap();
     if !check_auth(&cookies, &data) { return StatusCode::UNAUTHORIZED.into_response(); }
+    
+    let new_port = req.listen.split(':').last().unwrap_or("").trim();
+    if data.rules.iter().any(|r| r.id != id && r.listen.split(':').last().unwrap_or("").trim() == new_port) {
+        return Json(serde_json::json!({"status":"error", "message": "端口已被占用！"})).into_response();
+    }
+    // -------------------------
+
     if let Some(rule) = data.rules.iter_mut().find(|r| r.id == id) { rule.name = req.name; rule.listen = req.listen; rule.remote = req.remote; save_json(&data); save_config_toml(&data); }
     Json(serde_json::json!({"status":"ok"})).into_response()
 }
@@ -395,7 +409,12 @@ td[data-label="操作"] .btn-danger{background:rgba(239,68,68,0.1);color:var(--d
         }else{
             row.innerHTML=`<td data-label="状态"><span class="status-dot ${r.enabled?'bg-green':'bg-gray'}"></span>${r.enabled?'在线':'暂停'}</td><td data-label="备注"><strong>${r.name}</strong></td><td data-label="监听">${r.listen}</td><td data-label="目标">${r.remote}</td><td data-label="操作" style="display:flex;gap:6px;justify-content:flex-end;padding-right:15px"><button class="btn btn-gray" style="padding:6px 10px" onclick="tog('${r.id}')"><i class="fas ${r.enabled?'fa-pause':'fa-play'}"></i></button><button class="btn btn-primary" style="padding:6px 10px" onclick="openEdit('${r.id}')"><i class="fas fa-edit"></i></button><button class="btn btn-danger" style="padding:6px 10px;background:#fee2e2;color:#ef4444" onclick="del('${r.id}')"><i class="fas fa-trash-alt"></i></button></td>`;
         }
-        t.appendChild(row)})}}async function add(){let [n,l,r]=['n','l','r'].map(x=>$(x).value);if(!n||!l||!r)return;if(!l.includes(':'))l='0.0.0.0:'+l;await fetch('/api/rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,listen:l,remote:r})});['n','l','r'].forEach(x=>$(x).value='');load()}async function tog(id){await fetch(`/api/rules/${id}/toggle`,{method:'POST'});load()}async function del(id){if(confirm('确定删除此规则吗？'))await fetch(`/api/rules/${id}`,{method:'DELETE'});load()}function openEdit(id){const r=rules.find(x=>x.id===id);$('edit_id').value=id;$('edit_n').value=r.name;
+        t.appendChild(row)})}}async function add(){let [n,l,r]=['n','l','r'].map(x=>$(x).value);if(!n||!l||!r)return;if(!l.includes(':'))l='0.0.0.0:'+l;
+        // 添加规则 - 前端处理
+        const res = await fetch('/api/rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,listen:l,remote:r})});
+        const d = await res.json();
+        if(d.status === 'error') { alert(d.message); return; }
+        ['n','l','r'].forEach(x=>$(x).value='');load()}async function tog(id){await fetch(`/api/rules/${id}/toggle`,{method:'POST'});load()}async function del(id){if(confirm('确定删除此规则吗？'))await fetch(`/api/rules/${id}`,{method:'DELETE'});load()}function openEdit(id){const r=rules.find(x=>x.id===id);$('edit_id').value=id;$('edit_n').value=r.name;
         // 编辑时去掉 0.0.0.0: 前缀
         let listen = r.listen;
         if(listen.startsWith('0.0.0.0:')) listen = listen.replace('0.0.0.0:', '');
@@ -404,7 +423,12 @@ td[data-label="操作"] .btn-danger{background:rgba(239,68,68,0.1);color:var(--d
         // 保存时自动补全 0.0.0.0:
         let l = $('edit_l').value;
         if(!l.includes(':')) l = '0.0.0.0:' + l;
-        const body=JSON.stringify({name:$('edit_n').value,listen:l,remote:$('edit_r').value});await fetch(`/api/rules/${$('edit_id').value}`,{method:'PUT',headers:{'Content-Type':'application/json'},body});$('editModal').style.display='none';load()}function openSettings(){$('setModal').style.display='flex';switchTab(0)}function closeModal(){document.querySelectorAll('.modal').forEach(x=>x.style.display='none')}function switchTab(idx){document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active',i===idx));document.querySelectorAll('.tab-content').forEach((c,i)=>c.classList.toggle('active',i===idx))}async function saveAccount(){await fetch('/api/admin/account',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('set_u').value,password:$('set_p').value})});alert('账户已更新，请重新登录');location.reload()}async function saveBg(){await fetch('/api/admin/bg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bg_pc:$('bg_pc').value,bg_mobile:$('bg_mob').value})});location.reload()}async function doLogout(){await fetch('/logout',{method:'POST'});location.href='/login'}load();window.addEventListener('resize',render);</script></body></html>
+        // 编辑规则 - 前端处理
+        const body=JSON.stringify({name:$('edit_n').value,listen:l,remote:$('edit_r').value});
+        const res = await fetch(`/api/rules/${$('edit_id').value}`,{method:'PUT',headers:{'Content-Type':'application/json'},body});
+        const d = await res.json();
+        if(d.status === 'error') { alert(d.message); return; }
+        $('editModal').style.display='none';load()}function openSettings(){$('setModal').style.display='flex';switchTab(0)}function closeModal(){document.querySelectorAll('.modal').forEach(x=>x.style.display='none')}function switchTab(idx){document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active',i===idx));document.querySelectorAll('.tab-content').forEach((c,i)=>c.classList.toggle('active',i===idx))}async function saveAccount(){await fetch('/api/admin/account',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('set_u').value,password:$('set_p').value})});alert('账户已更新，请重新登录');location.reload()}async function saveBg(){await fetch('/api/admin/bg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bg_pc:$('bg_pc').value,bg_mobile:$('bg_mob').value})});location.reload()}async function doLogout(){await fetch('/logout',{method:'POST'});location.href='/login'}load();window.addEventListener('resize',render);</script></body></html>
 "#;
 EOF
 
@@ -458,4 +482,3 @@ echo -e "访问地址 : ${YELLOW}http://${IP}:${PANEL_PORT}${RESET}"
 echo -e "默认用户 : ${YELLOW}${DEFAULT_USER}${RESET}"
 echo -e "默认密码 : ${YELLOW}${DEFAULT_PASS}${RESET}"
 echo -e "------------------------------------------"
-
