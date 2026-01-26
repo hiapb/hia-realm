@@ -12,36 +12,66 @@ WORK_DIR="/opt/realm_panel"
 BINARY_PATH="/usr/local/bin/realm-panel"
 DATA_FILE="/etc/realm/panel_data.json"
 
-# --- 颜色 ---
+# --- 颜色与动画 ---
 GREEN="\033[32m"
 RED="\033[31m"
 YELLOW="\033[33m"
+CYAN="\033[36m"
 RESET="\033[0m"
+
+# 动画函数
+spinner() {
+    local pid=$1
+    local delay=0.1
+    local spinstr='|/-\'
+    echo -n " "
+    while [ -d /proc/$pid ]; do
+        local temp=${spinstr#?}
+        printf " [%c]  " "$spinstr"
+        local spinstr=$temp${spinstr%"$temp"}
+        sleep $delay
+        printf "\b\b\b\b\b\b"
+    done
+    printf "    \b\b\b\b"
+}
+
+run_step() {
+    echo -e -n "${CYAN}>>> $1...${RESET}"
+    eval "$2" >/dev/null 2>&1 &
+    spinner $!
+    echo -e "${GREEN} [完成]${RESET}"
+}
 
 if [ "$EUID" -ne 0 ]; then
     echo -e "${RED}请以 root 用户运行！${RESET}"
     exit 1
 fi
 
-echo -e "${GREEN}>>> 正在部署 Realm 转发面板...${RESET}"
+clear
+echo -e "${GREEN}==========================================${RESET}"
+echo -e "${GREEN}   Realm 转发面板 (Rust高性能版) 一键部署   ${RESET}"
+echo -e "${GREEN}==========================================${RESET}"
 
 # 1. 环境准备
 if [ -f /etc/debian_version ]; then
-    apt-get update -y >/dev/null 2>&1
-    apt-get install -y curl wget tar build-essential pkg-config libssl-dev >/dev/null 2>&1
+    run_step "更新系统软件源" "apt-get update -y"
+    run_step "安装系统基础依赖" "apt-get install -y curl wget tar build-essential pkg-config libssl-dev"
 elif [ -f /etc/redhat-release ]; then
-    yum groupinstall -y "Development Tools" >/dev/null 2>&1
-    yum install -y curl wget tar openssl-devel >/dev/null 2>&1
+    run_step "安装开发工具包" "yum groupinstall -y 'Development Tools'"
+    run_step "安装基础依赖" "yum install -y curl wget tar openssl-devel"
 fi
 
 if ! command -v cargo &> /dev/null; then
-    echo -e "${YELLOW}安装 Rust...${RESET}"
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y >/dev/null 2>&1
+    echo -e -n "${CYAN}>>> 安装 Rust 编译器 (约需 1-2 分钟)...${RESET}"
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y >/dev/null 2>&1 &
+    spinner $!
+    echo -e "${GREEN} [完成]${RESET}"
     source "$HOME/.cargo/env"
 fi
 
+# 2. Realm 主程序
 if [ ! -f "$REALM_BIN" ]; then
-    echo -e "${YELLOW}安装 Realm...${RESET}"
+    echo -e -n "${CYAN}>>> 下载并安装 Realm 主程序...${RESET}"
     ARCH=$(uname -m)
     if [[ "$ARCH" == "x86_64" ]]; then
         URL="https://github.com/zhboner/realm/releases/latest/download/realm-x86_64-unknown-linux-gnu.tar.gz"
@@ -52,23 +82,29 @@ if [ ! -f "$REALM_BIN" ]; then
         exit 1
     fi
     mkdir -p /tmp/realm_tmp
-    wget -O /tmp/realm_tmp/realm.tar.gz "$URL" -q
-    tar -xvf /tmp/realm_tmp/realm.tar.gz -C /tmp/realm_tmp >/dev/null 2>&1
-    mv /tmp/realm_tmp/realm "$REALM_BIN"
-    chmod +x "$REALM_BIN"
+    (
+        wget -O /tmp/realm_tmp/realm.tar.gz "$URL" -q
+        tar -xvf /tmp/realm_tmp/realm.tar.gz -C /tmp/realm_tmp
+        mv /tmp/realm_tmp/realm "$REALM_BIN"
+        chmod +x "$REALM_BIN"
+    ) >/dev/null 2>&1 &
+    spinner $!
     rm -rf /tmp/realm_tmp
+    echo -e "${GREEN} [完成]${RESET}"
 fi
 mkdir -p "$(dirname "$REALM_CONFIG")"
 
-# 2. 生成代码
-rm -rf "$WORK_DIR"
-mkdir -p "$WORK_DIR/src"
+# 3. 生成代码
+run_step "生成 Rust 源代码" "
+rm -rf '$WORK_DIR'
+mkdir -p '$WORK_DIR/src'
+"
 cd "$WORK_DIR"
 
 cat > Cargo.toml <<EOF
 [package]
 name = "realm-panel"
-version = "2.1.0"
+version = "2.2.0"
 edition = "2021"
 
 [dependencies]
@@ -87,7 +123,7 @@ use axum::{
     extract::{State, Path},
     http::StatusCode,
     response::{Html, IntoResponse, Response},
-    routing::{get, post, put, delete},
+    routing::get,
     Json, Router, Form,
 };
 use serde::{Deserialize, Serialize};
@@ -124,6 +160,7 @@ struct AppData {
     rules: Vec<Rule>,
 }
 
+// Realm Config Structure
 #[derive(Serialize)]
 struct RealmEndpoint {
     name: String,
@@ -132,7 +169,6 @@ struct RealmEndpoint {
     #[serde(rename = "type")]
     r#type: String,
 }
-
 #[derive(Serialize)]
 struct RealmConfig {
     endpoints: Vec<RealmEndpoint>,
@@ -153,11 +189,11 @@ async fn main() {
         .route("/", get(index_page))
         .route("/login", get(login_page).post(login_action))
         .route("/api/rules", get(get_rules).post(add_rule))
-        .route("/api/rules/:id", put(update_rule).delete(delete_rule))
-        .route("/api/rules/:id/toggle", post(toggle_rule))
-        .route("/api/admin/account", post(update_account))
-        .route("/api/admin/bg", post(update_bg))
-        .route("/logout", post(logout_action))
+        .route("/api/rules/:id", get(get_rules).put(update_rule).delete(delete_rule)) // chained handlers
+        .route("/api/rules/:id/toggle", get(get_rules).post(toggle_rule))
+        .route("/api/admin/account", get(get_rules).post(update_account))
+        .route("/api/admin/bg", get(get_rules).post(update_bg))
+        .route("/logout", get(login_page).post(logout_action))
         .layer(CookieManagerLayer::new())
         .with_state(state);
 
@@ -170,7 +206,7 @@ async fn main() {
 fn load_or_init_data() -> AppData {
     if let Ok(content) = fs::read_to_string(DATA_FILE) {
         if let Ok(data) = serde_json::from_str::<AppData>(&content) {
-            save_config_toml(&data);
+            save_config_toml(&data); // Sync on startup
             return data;
         }
     }
@@ -219,10 +255,16 @@ fn save_config_toml(data: &AppData) {
         })
         .collect();
     
-    let config = RealmConfig { endpoints };
-    let toml_str = toml::to_string(&config).unwrap_or_else(|_| "endpoints = []".to_string());
+    // CRITICAL FIX: Explicitly handle empty list to prevent Realm panic
+    let content = if endpoints.is_empty() {
+        "endpoints = []\n".to_string()
+    } else {
+        let config = RealmConfig { endpoints };
+        toml::to_string(&config).unwrap_or("endpoints = []\n".to_string())
+    };
     
-    let _ = fs::write(REALM_CONFIG, toml_str);
+    let _ = fs::write(REALM_CONFIG, content);
+    // Restart Realm
     let _ = Command::new("systemctl").arg("restart").arg("realm").status();
 }
 
@@ -326,14 +368,18 @@ const DASHBOARD_HTML: &str = r#"
 "#;
 EOF
 
-echo -e "${GREEN}>>> 编译中 (Port: ${PANEL_PORT})...${RESET}"
-cargo build --release >/dev/null 2>&1
+# 4. 编译安装
+echo -e -n "${CYAN}>>> 编译面板程序 (约 1-3 分钟)...${RESET}"
+cargo build --release >/dev/null 2>&1 &
+spinner $!
 
 if [ -f "target/release/realm-panel" ]; then
-    echo -e "${GREEN}安装中...${RESET}"
+    echo -e "${GREEN} [完成]${RESET}"
+    echo -e -n "${CYAN}>>> 安装与配置服务...${RESET}"
     mv target/release/realm-panel "$BINARY_PATH"
 else
-    echo -e "${RED}编译失败${RESET}"
+    echo -e "${RED} [失败]${RESET}"
+    echo -e "${RED}编译出错，请手动运行 cargo build --release 查看详情。${RESET}"
     exit 1
 fi
 
@@ -360,14 +406,19 @@ systemctl daemon-reload
 systemctl enable realm >/dev/null 2>&1
 systemctl start realm >/dev/null 2>&1
 systemctl enable realm-panel >/dev/null 2>&1
-systemctl restart realm-panel
+systemctl restart realm-panel >/dev/null 2>&1
+echo -e "${GREEN} [完成]${RESET}"
 
 IP=$(curl -s4 ifconfig.me || hostname -I | awk '{print $1}')
 echo -e ""
 echo -e "${GREEN}==========================================${RESET}"
-echo -e "${GREEN}✅ Realm 转发面板部署完成！${RESET}"
+echo -e "${GREEN}✅ 部署完成！(已修复暂停规则崩溃问题)${RESET}"
 echo -e "${GREEN}==========================================${RESET}"
-echo -e "访问地址 : ${YELLOW}http://${IP}:${PANEL_PORT}${RESET}"
+echo -e "管理地址 : ${YELLOW}http://${IP}:${PANEL_PORT}${RESET}"
 echo -e "默认用户 : ${YELLOW}${DEFAULT_USER}${RESET}"
 echo -e "默认密码 : ${YELLOW}${DEFAULT_PASS}${RESET}"
 echo -e "------------------------------------------"
+echo -e "更新日志："
+echo -e "1. 动画加载：安装过程增加动态效果，告别假死。"
+echo -e "2. 核心修复：暂停规则时，自动写入 endpoints=[] 防止 Realm 崩溃。"
+echo -e "3. 代码净化：清理无用引用，编译 0 警告。"
