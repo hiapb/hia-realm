@@ -368,7 +368,7 @@ const DASHBOARD_HTML: &str = r#"
 EOF
 
 # 4. 编译安装
-echo -e -n "${CYAN}>>> 编译面板程序 (优化版)...${RESET}"
+echo -e -n "${CYAN}>>> 编译面板程序 (请耐心等待!)...${RESET}"
 cargo build --release >/dev/null 2>&1 &
 spinner $!
 
