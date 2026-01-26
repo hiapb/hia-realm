@@ -23,7 +23,7 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-echo -e "${GREEN}>>> 正在部署 Realm 转发面板 (修复版)...${RESET}"
+echo -e "${GREEN}>>> 正在部署 Realm 转发面板...${RESET}"
 
 # 1. 环境准备
 if [ -f /etc/debian_version ]; then
