@@ -49,7 +49,7 @@ fi
 
 clear
 echo -e "${GREEN}==========================================${RESET}"
-echo -e "${GREEN}Realm 面板 (IPv6支持+UI修复版) 一键部署   ${RESET}"
+echo -e "${GREEN}Realm 面板 一键部署   ${RESET}"
 echo -e "${GREEN}==========================================${RESET}"
 
 # 1. 环境准备
@@ -62,7 +62,7 @@ elif [ -f /etc/redhat-release ]; then
 fi
 
 if ! command -v cargo &> /dev/null; then
-    echo -e -n "${CYAN}>>> 安装 Rust 编译器 (约需 1-2 分钟)...${RESET}"
+    echo -e -n "${CYAN}>>> 安装 Rust 编译器...${RESET}"
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y >/dev/null 2>&1 &
     spinner $!
     echo -e "${GREEN} [完成]${RESET}"
@@ -372,7 +372,7 @@ const DASHBOARD_HTML: &str = r#"
 EOF
 
 # 4. 编译安装
-echo -e -n "${CYAN}>>> 编译面板程序 (约 1-3 分钟)...${RESET}"
+echo -e -n "${CYAN}>>> 编译面板程序 (请耐心等待！)...${RESET}"
 cargo build --release >/dev/null 2>&1 &
 spinner $!
 
@@ -415,10 +415,9 @@ echo -e "${GREEN} [完成]${RESET}"
 IP=$(curl -s4 ifconfig.me || hostname -I | awk '{print $1}')
 echo -e ""
 echo -e "${GREEN}==========================================${RESET}"
-echo -e "${GREEN}✅ 部署完成！(已修复移动端布局 + IPv6提示)${RESET}"
+echo -e "${GREEN}✅ Realm 转发面板部署完成！${RESET}"
 echo -e "${GREEN}==========================================${RESET}"
 echo -e "访问地址 : ${YELLOW}http://${IP}:${PANEL_PORT}${RESET}"
 echo -e "默认用户 : ${YELLOW}${DEFAULT_USER}${RESET}"
 echo -e "默认密码 : ${YELLOW}${DEFAULT_PASS}${RESET}"
 echo -e "------------------------------------------"
-echo -e "IPv6 填写示例: [2400:3200::1]:443 (必须加中括号)"
