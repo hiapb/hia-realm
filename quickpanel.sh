@@ -1,9 +1,8 @@
 #!/bin/bash
 
 # --- 配置 ---
-# 填写你上传的成品二进制文件直链
-URL_AMD="https://github.com/hiapb/hia-realm/releases/download/realm/realm-panel.tar.gz"
-URL_ARM=""  # <--- 在这里填入你以后编译好的 ARM 版链接
+URL_AMD="https://github.com/hiapb/hia-realm/releases/download/realm/realm-panel-amd.tar.gz"
+URL_ARM="" 
 
 PANEL_PORT="4794"
 DEFAULT_USER="admin"
