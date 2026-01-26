@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# --- 配置 ---
+# --- 配置 (可按需修改) ---
 PANEL_PORT="4794"
 DEFAULT_USER="admin"
 DEFAULT_PASS="123456"
@@ -12,13 +12,14 @@ WORK_DIR="/opt/realm_panel"
 BINARY_PATH="/usr/local/bin/realm-panel"
 DATA_FILE="/etc/realm/panel_data.json"
 
-# --- 颜色与动画 ---
+# --- 颜色定义 ---
 GREEN="\033[32m"
 RED="\033[31m"
-YELLOW="\033[33m"
 CYAN="\033[36m"
 RESET="\033[0m"
+YELLOW="\033[33m"
 
+# --- 辅助函数 ---
 spinner() {
     local pid=$1
     local delay=0.1
@@ -48,62 +49,46 @@ fi
 
 clear
 echo -e "${GREEN}==========================================${RESET}"
-echo -e "${GREEN}Realm 面板 (柔和色彩 & 全圆角版)   ${RESET}"
+echo -e "${GREEN}Realm 面板 (截图高仿还原版)${RESET}"
 echo -e "${GREEN}==========================================${RESET}"
 
-# 1. 环境准备
+# 1. 依赖检查与安装
 if [ -f /etc/debian_version ]; then
-    run_step "更新系统软件源" "apt-get update -y"
-    run_step "安装系统基础依赖" "apt-get install -y curl wget tar build-essential pkg-config libssl-dev"
+    run_step "更新源与依赖" "apt-get update -y && apt-get install -y curl wget tar build-essential pkg-config libssl-dev"
 elif [ -f /etc/redhat-release ]; then
-    run_step "安装开发工具包" "yum groupinstall -y 'Development Tools'"
-    run_step "安装基础依赖" "yum install -y curl wget tar openssl-devel"
+    run_step "更新源与依赖" "yum groupinstall -y 'Development Tools' && yum install -y curl wget tar openssl-devel"
 fi
 
 if ! command -v cargo &> /dev/null; then
-    echo -e -n "${CYAN}>>> 安装 Rust 编译器...${RESET}"
+    echo -e -n "${CYAN}>>> 安装 Rust 环境...${RESET}"
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y >/dev/null 2>&1 &
     spinner $!
-    echo -e "${GREEN} [完成]${RESET}"
     source "$HOME/.cargo/env"
+    echo -e "${GREEN} [完成]${RESET}"
 fi
 
-# 2. Realm 主程序
+# 2. Realm 核心安装
 if [ ! -f "$REALM_BIN" ]; then
-    echo -e -n "${CYAN}>>> 下载并安装 Realm 主程序...${RESET}"
+    echo -e -n "${CYAN}>>> 下载 Realm 核心...${RESET}"
     ARCH=$(uname -m)
-    if [[ "$ARCH" == "x86_64" ]]; then
-        URL="https://github.com/zhboner/realm/releases/latest/download/realm-x86_64-unknown-linux-gnu.tar.gz"
-    elif [[ "$ARCH" == "aarch64" ]]; then
-        URL="https://github.com/zhboner/realm/releases/latest/download/realm-aarch64-unknown-linux-gnu.tar.gz"
-    else
-        echo -e "${RED}不支持架构: $ARCH${RESET}"
-        exit 1
-    fi
+    [ "$ARCH" == "x86_64" ] && URL="https://github.com/zhboner/realm/releases/latest/download/realm-x86_64-unknown-linux-gnu.tar.gz"
+    [ "$ARCH" == "aarch64" ] && URL="https://github.com/zhboner/realm/releases/latest/download/realm-aarch64-unknown-linux-gnu.tar.gz"
     mkdir -p /tmp/realm_tmp
-    (
-        wget -O /tmp/realm_tmp/realm.tar.gz "$URL" -q
-        tar -xvf /tmp/realm_tmp/realm.tar.gz -C /tmp/realm_tmp
-        mv /tmp/realm_tmp/realm "$REALM_BIN"
-        chmod +x "$REALM_BIN"
-    ) >/dev/null 2>&1 &
-    spinner $!
+    wget -O /tmp/realm_tmp/realm.tar.gz "$URL" -q && tar -xvf /tmp/realm_tmp/realm.tar.gz -C /tmp/realm_tmp >/dev/null 2>&1
+    mv /tmp/realm_tmp/realm "$REALM_BIN" && chmod +x "$REALM_BIN"
     rm -rf /tmp/realm_tmp
     echo -e "${GREEN} [完成]${RESET}"
 fi
 mkdir -p "$(dirname "$REALM_CONFIG")"
 
-# 3. 生成代码
-run_step "生成 Rust 源代码" "
-rm -rf '$WORK_DIR'
-mkdir -p '$WORK_DIR/src'
-"
+# 3. 构建面板代码
+run_step "准备源代码目录" "rm -rf '$WORK_DIR' && mkdir -p '$WORK_DIR/src'"
 cd "$WORK_DIR"
 
 cat > Cargo.toml <<EOF
 [package]
 name = "realm-panel"
-version = "3.3.0"
+version = "3.5.0"
 edition = "2021"
 
 [dependencies]
@@ -113,10 +98,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 tower-cookies = "0.10"
-anyhow = "1.0"
 uuid = { version = "1", features = ["v4"] }
 EOF
 
+# 写入 Rust 主逻辑
 cat > src/main.rs << 'EOF'
 use axum::{
     extract::{State, Path},
@@ -131,6 +116,10 @@ use tower_cookies::{Cookie, Cookies, CookieManagerLayer};
 
 const REALM_CONFIG: &str = "/etc/realm/config.toml";
 const DATA_FILE: &str = "/etc/realm/panel_data.json";
+
+// 默认背景图 (截图中的森林风格)
+fn default_bg_pc() -> String { "https://img.inim.im/file/1769439286929_61891168f564c650f6fb03d1962e5f37.jpeg".to_string() }
+fn default_bg_mobile() -> String { "https://img.inim.im/file/1764296937373_bg_m_2.png".to_string() }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct Rule {
@@ -150,9 +139,6 @@ struct AdminConfig {
     #[serde(default = "default_bg_mobile")]
     bg_mobile: String,
 }
-// 修改默认PC背景图
-fn default_bg_pc() -> String { "https://img.inim.im/file/1769439286929_61891168f564c650f6fb03d1962e5f37.jpeg".to_string() }
-fn default_bg_mobile() -> String { "https://img.inim.im/file/1764296937373_bg_m_2.png".to_string() }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct AppData {
@@ -253,6 +239,7 @@ fn save_config_toml(data: &AppData) {
         })
         .collect();
     
+    // 防止配置文件为空导致报错，添加保活规则
     if endpoints.is_empty() {
         endpoints.push(RealmEndpoint {
             name: "system-keepalive".to_string(),
@@ -301,7 +288,7 @@ async fn login_action(cookies: Cookies, State(state): State<Arc<AppState>>, Form
         cookie.set_path("/"); cookie.set_http_only(true); cookies.add(cookie);
         axum::response::Redirect::to("/").into_response()
     } else {
-        Html("<script>alert('用户名或密码错误');window.location='/login'</script>").into_response()
+        Html("<script>alert('Error');window.location='/login'</script>").into_response()
     }
 }
 async fn logout_action(cookies: Cookies) -> Response {
@@ -309,6 +296,7 @@ async fn logout_action(cookies: Cookies) -> Response {
     axum::response::Redirect::to("/login").into_response()
 }
 
+// API Routes
 async fn get_rules(cookies: Cookies, State(state): State<Arc<AppState>>) -> Response {
     let data = state.data.lock().unwrap();
     if !check_auth(&cookies, &data) { return StatusCode::UNAUTHORIZED.into_response(); }
@@ -359,30 +347,264 @@ async fn update_bg(cookies: Cookies, State(state): State<Arc<AppState>>, Json(re
     Json(serde_json::json!({"status":"ok"})).into_response()
 }
 
+// --- HTML 模板 ---
+
 const LOGIN_HTML: &str = r#"
-<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"><title>Realm Login</title><style>*{margin:0;padding:0;box-sizing:border-box}body{height:100vh;width:100vw;overflow:hidden;display:flex;justify-content:center;align-items:center;font-family:-apple-system,sans-serif;background:url('{{BG_PC}}') no-repeat center center/cover}@media(max-width:768px){body{background-image:url('{{BG_MOBILE}}')}}.overlay{position:absolute;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.1)}.box{position:relative;z-index:2;background:rgba(255,255,255,0.4);backdrop-filter:blur(25px);-webkit-backdrop-filter:blur(25px);padding:2rem;border-radius:16px;border:1px solid rgba(255,255,255,0.3);box-shadow:0 8px 32px rgba(0,0,0,0.1);width:90%;max-width:350px;text-align:center}h2{margin-bottom:1.5rem;color:#4b5563;font-weight:600;text-shadow:0 1px 1px rgba(255,255,255,0.6)}input{width:100%;padding:12px;margin-bottom:1rem;border:1px solid rgba(255,255,255,0.4);border-radius:8px;outline:none;background:rgba(255,255,255,0.5);transition:0.2s;color:#374151}input:focus{background:rgba(255,255,255,0.9);border-color:#2563eb}button{width:100%;padding:12px;background:rgba(37,99,235,0.9);color:white;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:1rem;transition:0.2s;backdrop-filter:blur(5px)}button:hover{background:#1d4ed8;transform:scale(1.02)}</style></head><body><div class="overlay"></div><div class="box"><h2>Realm 转发面板</h2><form action="/login" method="post"><input type="text" name="username" placeholder="Username" required><input type="password" name="password" placeholder="Password" required><button type="submit">登录</button></form></div></body></html>
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1"><title>Login</title><style>*{margin:0;padding:0;box-sizing:border-box}body{height:100vh;display:flex;justify-content:center;align-items:center;background:url('{{BG_PC}}') center/cover;font-family:sans-serif}.box{background:rgba(255,255,255,0.7);backdrop-filter:blur(20px);padding:30px;border-radius:12px;width:320px;box-shadow:0 8px 32px rgba(0,0,0,0.1)}input{width:100%;padding:12px;margin:10px 0;border:none;border-radius:6px;background:rgba(255,255,255,0.6)}button{width:100%;padding:12px;background:#3b82f6;color:#fff;border:none;border-radius:6px;cursor:pointer}</style></head><body><div class="box"><h2 style="text-align:center;margin-bottom:20px;color:#333">Realm 面板</h2><form action="/login" method="post"><input name="username" placeholder="用户" required><input type="password" name="password" placeholder="密码" required><button type="submit">登录</button></form></div></body></html>
 "#;
 
 const DASHBOARD_HTML: &str = r#"
-<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"><title>Realm Panel</title><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet"><style>:root{--primary:#2563eb;--danger:#ef4444;--success:#10b981;--text-main:#374151;--text-sub:#6b7280}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(0,0,0,0.2);border-radius:10px}::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,0.4)}*{box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;margin:0;padding:0;height:100vh;height:100dvh;overflow:hidden;background:url('{{BG_PC}}') no-repeat center center/cover;display:flex;flex-direction:column;color:var(--text-main)}@media(max-width:768px){body{background-image:url('{{BG_MOBILE}}')}}.overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(255,255,255,0.02);z-index:-1}.navbar{flex:0 0 auto;background:rgba(255,255,255,0.4);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid rgba(255,255,255,0.3);padding:1rem 1.5rem;box-shadow:0 2px 10px rgba(0,0,0,0.02);display:flex;justify-content:space-between;align-items:center;z-index:10}.brand{font-weight:700;font-size:1.2rem;color:var(--primary);display:flex;align-items:center;gap:10px;text-shadow:0 0 1px rgba(255,255,255,0.3)}.nav-actions{display:flex;gap:10px}.container{flex:1 1 auto;display:flex;flex-direction:column;max-width:1200px;margin:1rem auto;width:100%;padding:0 1rem;overflow:hidden}.card{background:transparent;border-radius:16px;padding:1.2rem;margin-bottom:1rem}.card-fixed{background:rgba(255,255,255,0.35);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.3);border-radius:16px;flex:0 0 auto}.card-scroll{flex:1 1 auto;overflow:hidden;display:flex;flex-direction:column;padding:0;border-radius:16px}.table-wrapper{flex:1;overflow-y:auto;padding:0 1.2rem}table{width:100%;border-collapse:separate;border-spacing:0 8px}thead th{position:sticky;top:0;background:rgba(255,255,255,0.4);backdrop-filter:blur(15px);-webkit-backdrop-filter:blur(15px);z-index:5;padding:15px 10px;text-align:left;color:var(--text-main);font-weight:600;text-shadow:0 1px 0 rgba(255,255,255,0.4)}thead th:first-child{border-top-left-radius:12px;border-bottom-left-radius:12px}thead th:last-child{border-top-right-radius:12px;border-bottom-right-radius:12px}tbody tr{background:rgba(255,255,255,0.35);backdrop-filter:blur(12px);transition:0.2s;box-shadow:0 2px 5px rgba(0,0,0,0.01)}tbody tr:hover{background:rgba(255,255,255,0.5);transform:scale(1.002)}td{padding:15px 10px;color:var(--text-main);font-size:0.95rem;font-weight:500;text-shadow:0 1px 0 rgba(255,255,255,0.3)}td:first-child{border-top-left-radius:12px;border-bottom-left-radius:12px}td:last-child{border-top-right-radius:12px;border-bottom-right-radius:12px}.btn{padding:8px 14px;border-radius:8px;border:none;cursor:pointer;color:white;transition:0.2s;display:inline-flex;align-items:center;gap:5px;box-shadow:0 2px 4px rgba(0,0,0,0.05);text-shadow:none;font-weight:500}.btn-primary{background:rgba(37,99,235,0.9)}.btn-danger{background:rgba(239,68,68,0.9)}.btn-gray{background:rgba(229,231,235,0.8);color:var(--text-main)}.grid-input{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px}input{padding:10px;border:1px solid rgba(255,255,255,0.3);background:rgba(255,255,255,0.4);border-radius:8px;outline:none;transition:0.2s;color:var(--text-main);font-weight:500}input::placeholder{color:var(--text-sub)}input:focus{border-color:var(--primary);background:rgba(255,255,255,0.8)}.status-dot{height:8px;width:8px;border-radius:50%;display:inline-block;margin-right:6px}.bg-green{background:var(--success);box-shadow:0 0 5px var(--success)}.bg-gray{background:#9ca3af}.row-paused{opacity:0.75;background:rgba(255,255,255,0.2)}.empty-state{padding:40px;text-align:center;color:var(--text-sub);font-style:italic;text-shadow:0 1px 0 rgba(255,255,255,0.4)}.modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.2);z-index:100;justify-content:center;align-items:center;backdrop-filter:blur(5px)}.modal-box{background:rgba(255,255,255,0.85);backdrop-filter:blur(30px);width:90%;max-width:450px;padding:2rem;border-radius:16px;box-shadow:0 10px 25px rgba(0,0,0,0.05);animation:popIn 0.2s ease;color:var(--text-main)}.modal-footer{margin-top:20px;display:flex;justify-content:flex-end;gap:15px}@keyframes popIn{from{transform:scale(0.95);opacity:0}to{transform:scale(1);opacity:1}}.tab-header{display:flex;border-bottom:1px solid rgba(0,0,0,0.05);margin-bottom:15px}.tab-btn{flex:1;padding:10px;text-align:center;cursor:pointer;color:var(--text-sub)}.tab-btn.active{color:var(--primary);border-bottom:2px solid var(--primary);font-weight:600}.tab-content{display:none}.tab-content.active{display:block}label{display:block;margin:10px 0 5px;font-size:0.9rem;color:var(--text-sub)}@media(max-width:768px){.grid-input{grid-template-columns:1fr}.container{padding:0.5rem;margin:0}.nav-text{display:none}thead{display:none}tr{display:flex;flex-direction:column;border:1px solid rgba(255,255,255,0.3);margin-bottom:10px;border-radius:12px;padding:10px;background:rgba(255,255,255,0.45);backdrop-filter:blur(10px)}td{border:none;padding:8px 0;display:flex;justify-content:space-between;align-items:center;border-radius:0!important}td::before{content:attr(data-label);font-weight:600;color:var(--text-sub);font-size:0.85rem}.table-wrapper{padding:0 5px}}</style></head><body><div class="overlay"></div><div class="navbar"><div class="brand"><i class="fas fa-network-wired"></i> <span class="nav-text">Realm 转发面板</span></div><div class="nav-actions"><button class="btn btn-gray" onclick="openSettings()"><i class="fas fa-cog"></i> <span class="nav-text">设置</span></button><form action="/logout" method="post" style="margin:0"><button class="btn btn-danger"><i class="fas fa-sign-out-alt"></i></button></form></div></div><div class="container"><div class="card card-fixed"><div class="grid-input"><input id="n" placeholder="备注"><input id="l" placeholder="监听端口 (如 10000)"><input id="r" placeholder="目标 (例 1.1.1.1:443 或 [2402::1]:443)"><button class="btn btn-primary" onclick="add()"><i class="fas fa-plus"></i> 添加</button></div></div><div class="card card-scroll"><div style="padding:10px 1.2rem;font-weight:600;color:var(--text-main);text-shadow:0 1px 0 rgba(255,255,255,0.5)">规则列表</div><div class="table-wrapper"><table id="ruleTable"><thead><tr><th>状态</th><th>备注</th><th>监听</th><th>目标</th><th style="text-align:left">操作</th></tr></thead><tbody id="list"></tbody></table><div id="emptyView" class="empty-state" style="display:none"><i class="fas fa-ghost" style="display:block;font-size:2rem;margin-bottom:10px"></i>暂无转发规则</div></div></div></div><div id="setModal" class="modal"><div class="modal-box"><div class="tab-header"><div class="tab-btn active" onclick="switchTab(0)">账号安全</div><div class="tab-btn" onclick="switchTab(1)">界面背景</div></div><div class="tab-content active" id="tab0"><label>用户名</label><input id="set_u" value="{{USER}}"><label>新密码 (留空不改)</label><input id="set_p" type="password"><div class="modal-footer"><button class="btn btn-gray" onclick="closeModal()">取消</button><button class="btn btn-primary" onclick="saveAccount()">保存账号</button></div></div><div class="tab-content" id="tab1"><label>PC端背景图 URL</label><input id="bg_pc" value="{{BG_PC}}"><label>移动端背景图 URL</label><input id="bg_mob" value="{{BG_MOBILE}}"><div class="modal-footer"><button class="btn btn-gray" onclick="closeModal()">取消</button><button class="btn btn-primary" onclick="saveBg()">保存背景</button></div></div></div></div><div id="editModal" class="modal"><div class="modal-box"><h3>修改规则</h3><input type="hidden" id="edit_id"><label>备注</label><input id="edit_n"><label>监听端口</label><input id="edit_l"><label>目标地址</label><input id="edit_r" placeholder="1.1.1.1:443 或 [2402::1]:443"><div class="modal-footer"><button class="btn btn-gray" onclick="closeModal()">取消</button><button class="btn btn-primary" onclick="saveEdit()">保存修改</button></div></div></div><script>let rules=[];const $=id=>document.getElementById(id);async function load(){const r=await fetch('/api/rules');if(r.status===401)location.href='/login';const d=await r.json();rules=d.rules;render();window.dispatchEvent(new Event('resize'))}function render(){const t=$('list');const ev=$('emptyView');const table=$('ruleTable');t.innerHTML='';if(rules.length===0){ev.style.display='block';table.style.display=window.innerWidth<768?'none':'table'}else{ev.style.display='none';table.style.display='table';rules.forEach(r=>{const row=document.createElement('tr');if(!r.enabled)row.className='row-paused';row.innerHTML=`<td data-label="状态"><span class="status-dot ${r.enabled?'bg-green':'bg-gray'}"></span>${r.enabled?'运行':'暂停'}</td><td data-label="备注"><strong>${r.name}</strong></td><td data-label="监听">${r.listen}</td><td data-label="目标">${r.remote}</td><td data-label="操作" style="text-align:left;gap:5px;display:flex;justify-content:flex-start"><button class="btn btn-sm ${r.enabled?'btn-gray':'btn-primary'}" onclick="tog('${r.id}')"><i class="fas ${r.enabled?'fa-pause':'fa-play'}"></i></button><button class="btn btn-sm btn-primary" onclick="openEdit('${r.id}')"><i class="fas fa-pen"></i></button><button class="btn btn-sm btn-danger" onclick="del('${r.id}')"><i class="fas fa-trash"></i></button></td>`;t.appendChild(row)})}}async function add(){let [n,l,r]=['n','l','r'].map(x=>$(x).value);if(!n || !l || !r) return alert('请填完完整！');if(!l.includes(':'))l='0.0.0.0:'+l;await fetch('/api/rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,listen:l,remote:r})});['n','l','r'].forEach(x=>$(x).value='');load()}async function tog(id){await fetch(`/api/rules/${id}/toggle`,{method:'POST'});load()}async function del(id){if(confirm('删除?'))await fetch(`/api/rules/${id}`,{method:'DELETE'});load()}function openEdit(id){const r=rules.find(x=>x.id===id);$('edit_id').value=id;$('edit_n').value=r.name;$('edit_l').value=r.listen;$('edit_r').value=r.remote;$('editModal').style.display='flex'}async function saveEdit(){const body=JSON.stringify({name:$('edit_n').value,listen:$('edit_l').value,remote:$('edit_r').value});await fetch(`/api/rules/${$('edit_id').value}`,{method:'PUT',headers:{'Content-Type':'application/json'},body});$('editModal').style.display='none';load()}function openSettings(){$('setModal').style.display='flex';switchTab(0)}function closeModal(){document.querySelectorAll('.modal').forEach(x=>x.style.display='none')}function switchTab(idx){document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active',i===idx));document.querySelectorAll('.tab-content').forEach((c,i)=>c.classList.toggle('active',i===idx))}async function saveAccount(){await fetch('/api/admin/account',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('set_u').value,password:$('set_p').value})});alert('账号更新，请重新登录');location.reload()}async function saveBg(){await fetch('/api/admin/bg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bg_pc:$('bg_pc').value,bg_mobile:$('bg_mob').value})});alert('背景已更新');location.reload()}window.addEventListener('load',()=>{load();setTimeout(()=>window.dispatchEvent(new Event('resize')),500)});</script></body></html>
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>转发规则管理</title>
+<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+<style>
+:root { --glass-bg: rgba(255, 255, 255, 0.65); --glass-border: rgba(255, 255, 255, 0.4); --text: #1f2937; --blue: #3b82f6; }
+* { margin: 0; padding: 0; box-sizing: border-box; outline: none; }
+body { font-family: -apple-system, "Microsoft YaHei", sans-serif; height: 100vh; background: url('{{BG_PC}}') no-repeat center center fixed; background-size: cover; color: var(--text); overflow: hidden; display: flex; flex-direction: column; }
+@media(max-width: 768px) { body { background-image: url('{{BG_MOBILE}}'); } }
+
+/* 顶部导航 */
+.navbar { display: flex; justify-content: space-between; align-items: center; padding: 15px 30px; background: rgba(255, 255, 255, 0.3); backdrop-filter: blur(10px); border-bottom: 1px solid rgba(255,255,255,0.2); }
+.brand { font-size: 18px; font-weight: bold; color: #111; display: flex; align-items: center; gap: 8px; }
+.btn-nav { background: rgba(255,255,255,0.5); border: 1px solid rgba(255,255,255,0.5); padding: 8px 15px; border-radius: 6px; cursor: pointer; transition: 0.2s; font-size: 14px; display: flex; align-items: center; gap: 5px; color: #333; }
+.btn-nav:hover { background: #fff; }
+
+/* 主容器 */
+.container { max-width: 1200px; margin: 20px auto; width: 95%; flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+/* 顶部输入栏 - 仿截图样式 */
+.input-bar { display: flex; gap: 10px; background: var(--glass-bg); backdrop-filter: blur(15px); padding: 15px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.02); align-items: center; }
+.input-group { flex: 1; }
+.input-field { width: 100%; padding: 12px 15px; border-radius: 8px; border: 1px solid transparent; background: rgba(255,255,255,0.5); font-size: 14px; color: #333; transition: 0.2s; }
+.input-field:focus { background: #fff; box-shadow: 0 0 0 2px var(--blue); }
+.btn-add { background: var(--blue); color: white; border: none; padding: 12px 20px; border-radius: 8px; cursor: pointer; font-weight: bold; white-space: nowrap; transition: 0.2s; display: flex; align-items: center; gap: 5px; }
+.btn-add:hover { background: #2563eb; }
+
+/* 标题 */
+.section-title { font-size: 16px; font-weight: 600; margin-bottom: 15px; color: #374151; padding-left: 5px; }
+
+/* 列表区域 - 核心修改：条状分离 */
+.list-container { flex: 1; overflow-y: auto; padding-right: 5px; }
+table { width: 100%; border-collapse: separate; border-spacing: 0 10px; } /* 关键：行间距 */
+
+thead th { text-align: left; padding: 0 15px 5px 15px; font-size: 13px; color: #6b7280; font-weight: normal; }
+tbody tr { background: rgba(255, 255, 255, 0.75); backdrop-filter: blur(10px); transition: transform 0.2s; box-shadow: 0 2px 4px rgba(0,0,0,0.01); }
+tbody tr:hover { transform: scale(1.002); background: rgba(255, 255, 255, 0.9); }
+
+/* 圆角处理 */
+td { padding: 18px 15px; vertical-align: middle; color: #333; font-size: 14px; border: none; }
+td:first-child { border-top-left-radius: 10px; border-bottom-left-radius: 10px; width: 100px; }
+td:last-child { border-top-right-radius: 10px; border-bottom-right-radius: 10px; text-align: right; }
+
+/* 状态点 */
+.status-badge { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; font-size: 14px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; }
+.dot.green { background: #10b981; box-shadow: 0 0 4px #10b981; }
+.dot.gray { background: #9ca3af; }
+
+/* 操作按钮 */
+.action-btn { width: 32px; height: 32px; border-radius: 6px; border: none; cursor: pointer; margin-left: 5px; display: inline-flex; align-items: center; justify-content: center; transition: 0.2s; }
+.btn-toggle { background: #e5e7eb; color: #374151; }
+.btn-toggle.active { background: #fee2e2; color: #ef4444; } 
+.btn-edit { background: #3b82f6; color: white; }
+.btn-del { background: #ef4444; color: white; }
+.action-btn:hover { opacity: 0.8; transform: translateY(-1px); }
+
+/* 模态框 */
+.modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.3); z-index: 100; justify-content: center; align-items: center; backdrop-filter: blur(5px); }
+.modal-box { background: rgba(255,255,255,0.95); width: 90%; max-width: 400px; padding: 25px; border-radius: 12px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1); }
+.modal h3 { margin-bottom: 15px; }
+.modal input { width: 100%; padding: 10px; margin: 8px 0; border: 1px solid #ddd; border-radius: 6px; }
+.modal-footer { margin-top: 20px; display: flex; justify-content: flex-end; gap: 10px; }
+
+/* 移动端适配 */
+@media(max-width: 768px) {
+    .input-bar { flex-direction: column; }
+    thead { display: none; }
+    table { border-spacing: 0 15px; }
+    tbody tr { display: flex; flex-direction: column; padding: 10px; height: auto; }
+    td { padding: 5px 10px; width: 100% !important; border-radius: 0 !important; display: flex; justify-content: space-between; align-items: center; }
+    td::before { content: attr(data-label); color: #666; font-size: 12px; }
+    td:last-child { justify-content: flex-end; margin-top: 10px; border-top: 1px solid rgba(0,0,0,0.05); padding-top: 10px; }
+}
+</style>
+</head>
+<body>
+
+<div class="navbar">
+    <div class="brand"><i class="fas fa-cube"></i> Realm 面板</div>
+    <div style="display:flex;gap:10px">
+        <button class="btn-nav" onclick="openSet()"><i class="fas fa-cog"></i> 面板设置</button>
+        <form action="/logout" method="post" style="margin:0"><button class="btn-nav" style="background:#fee2e2;color:#ef4444"><i class="fas fa-sign-out-alt"></i></button></form>
+    </div>
+</div>
+
+<div class="container">
+    <div class="input-bar">
+        <div class="input-group"><input id="n" class="input-field" placeholder="备注名称"></div>
+        <div class="input-group"><input id="l" class="input-field" placeholder="监听端口 (如 10000)"></div>
+        <div class="input-group"><input id="r" class="input-field" placeholder="落地地址 (ip:port)"></div>
+        <button class="btn-add" onclick="add()"><i class="fas fa-plus"></i> 添加规则</button>
+    </div>
+
+    <div class="section-title">转发规则管理</div>
+
+    <div class="list-container">
+        <table id="ruleTable">
+            <thead>
+                <tr>
+                    <th width="10%">状态</th>
+                    <th width="20%">备注</th>
+                    <th width="25%">监听</th>
+                    <th width="25%">落地</th>
+                    <th width="20%" style="text-align:right">操作</th>
+                </tr>
+            </thead>
+            <tbody id="list"></tbody>
+        </table>
+        <div id="empty" style="text-align:center;padding:40px;color:#666;display:none">暂无规则，请在上方添加</div>
+    </div>
+</div>
+
+<div id="setModal" class="modal">
+    <div class="modal-box">
+        <h3>面板设置</h3>
+        <label style="font-size:12px;color:#666">修改账户</label>
+        <input id="su" placeholder="用户名" value="{{USER}}">
+        <input id="sp" type="password" placeholder="新密码 (留空不改)">
+        <div style="height:15px"></div>
+        <label style="font-size:12px;color:#666">背景图片 URL</label>
+        <input id="bpc" placeholder="PC端背景" value="{{BG_PC}}">
+        <input id="bmb" placeholder="移动端背景" value="{{BG_MOBILE}}">
+        <div class="modal-footer">
+            <button class="btn-nav" onclick="closeModal()">取消</button>
+            <button class="btn-add" onclick="saveSet()">保存</button>
+        </div>
+    </div>
+</div>
+
+<div id="editModal" class="modal">
+    <div class="modal-box">
+        <h3>修改规则</h3>
+        <input type="hidden" id="eid">
+        <input id="en" placeholder="备注">
+        <input id="el" placeholder="监听端口">
+        <input id="er" placeholder="落地地址">
+        <div class="modal-footer">
+            <button class="btn-nav" onclick="closeModal()">取消</button>
+            <button class="btn-add" onclick="saveEdit()">保存</button>
+        </div>
+    </div>
+</div>
+
+<script>
+let rules = [];
+const $ = id => document.getElementById(id);
+
+async function load() {
+    const res = await fetch('/api/rules');
+    if(res.status === 401) return location.href = '/login';
+    const data = await res.json();
+    rules = data.rules;
+    render();
+}
+
+function render() {
+    const list = $('list');
+    list.innerHTML = '';
+    if(rules.length === 0) {
+        $('empty').style.display = 'block';
+        $('ruleTable').style.display = 'none';
+        return;
+    }
+    $('empty').style.display = 'none';
+    $('ruleTable').style.display = 'table'; // 或者是 block，但在 flex 下 table 更好
+
+    rules.forEach(r => {
+        const tr = document.createElement('tr');
+        if(!r.enabled) tr.style.opacity = '0.6';
+        tr.innerHTML = `
+            <td data-label="状态">
+                <div class="status-badge">
+                    <div class="dot ${r.enabled ? 'green' : 'gray'}"></div>
+                    ${r.enabled ? '在线' : '已停用'}
+                </div>
+            </td>
+            <td data-label="备注"><strong>${r.name}</strong></td>
+            <td data-label="监听" style="font-family:monospace">${r.listen}</td>
+            <td data-label="落地" style="font-family:monospace">${r.remote}</td>
+            <td data-label="操作">
+                <button class="action-btn btn-toggle" onclick="tog('${r.id}')" title="开关">
+                    <i class="fas ${r.enabled ? 'fa-pause' : 'fa-play'}"></i>
+                </button>
+                <button class="action-btn btn-edit" onclick="openEdit('${r.id}')" title="编辑">
+                    <i class="fas fa-pen"></i>
+                </button>
+                <button class="action-btn btn-del" onclick="del('${r.id}')" title="删除">
+                    <i class="fas fa-trash"></i>
+                </button>
+            </td>
+        `;
+        list.appendChild(tr);
+    });
+}
+
+async function add() {
+    let [n, l, r] = ['n', 'l', 'r'].map(x => $(x).value);
+    if(!n || !l || !r) return alert('请填写完整');
+    if(!l.includes(':')) l = '0.0.0.0:' + l;
+    await fetch('/api/rules', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: n, listen: l, remote: r}) });
+    ['n', 'l', 'r'].forEach(x => $(x).value = '');
+    load();
+}
+
+async function tog(id) { await fetch(`/api/rules/${id}/toggle`, {method: 'POST'}); load(); }
+async function del(id) { if(confirm('确定删除?')) { await fetch(`/api/rules/${id}`, {method: 'DELETE'}); load(); } }
+
+function openEdit(id) {
+    const r = rules.find(x => x.id === id);
+    $('eid').value = id; $('en').value = r.name; $('el').value = r.listen; $('er').value = r.remote;
+    $('editModal').style.display = 'flex';
+}
+
+async function saveEdit() {
+    const body = JSON.stringify({ name: $('en').value, listen: $('el').value, remote: $('er').value });
+    await fetch(`/api/rules/${$('eid').value}`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body });
+    closeModal(); load();
+}
+
+function openSet() { $('setModal').style.display = 'flex'; }
+function closeModal() { document.querySelectorAll('.modal').forEach(x => x.style.display = 'none'); }
+
+async function saveSet() {
+    await fetch('/api/admin/account', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({username:$('su').value, password:$('sp').value}) });
+    await fetch('/api/admin/bg', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({bg_pc:$('bpc').value, bg_mobile:$('bmb').value}) });
+    alert('保存成功，若修改了密码请重新登录');
+    location.reload();
+}
+
+window.onload = load;
+</script>
+</body>
+</html>
 "#;
 EOF
 
-# 4. 编译安装
-echo -e -n "${CYAN}>>> 编译面板程序 (请耐心等待！)...${RESET}"
+# 4. 编译与服务安装
+echo -e -n "${CYAN}>>> 编译面板程序 (Release模式，请耐心等待)...${RESET}"
 cargo build --release >/dev/null 2>&1 &
 spinner $!
-
-if [ -f "target/release/realm-panel" ]; then
-    echo -e "${GREEN} [完成]${RESET}"
-    echo -e -n "${CYAN}>>> 安装与配置服务...${RESET}"
-    mv target/release/realm-panel "$BINARY_PATH"
-else
-    echo -e "${RED} [失败]${RESET}"
-    echo -e "${RED}编译出错，请手动运行 cargo build --release 查看详情。${RESET}"
+if [ ! -f "target/release/realm-panel" ]; then
+    echo -e "${RED} 编译失败！请检查上方报错。${RESET}"
     exit 1
 fi
+echo -e "${GREEN} [完成]${RESET}"
 
+mv target/release/realm-panel "$BINARY_PATH"
 rm -rf "$WORK_DIR"
 
 cat > /etc/systemd/system/realm-panel.service <<EOF
@@ -407,14 +629,12 @@ systemctl enable realm >/dev/null 2>&1
 systemctl start realm >/dev/null 2>&1
 systemctl enable realm-panel >/dev/null 2>&1
 systemctl restart realm-panel >/dev/null 2>&1
-echo -e "${GREEN} [完成]${RESET}"
 
 IP=$(curl -s4 ifconfig.me || hostname -I | awk '{print $1}')
 echo -e ""
 echo -e "${GREEN}==========================================${RESET}"
-echo -e "${GREEN}✅ Realm 转发面板 (柔和色彩 & 全圆角版) 部署完成！${RESET}"
+echo -e "${GREEN}✅ Realm 面板 (UI高仿版) 部署完成！${RESET}"
 echo -e "${GREEN}==========================================${RESET}"
 echo -e "访问地址 : ${YELLOW}http://${IP}:${PANEL_PORT}${RESET}"
 echo -e "默认用户 : ${YELLOW}${DEFAULT_USER}${RESET}"
 echo -e "默认密码 : ${YELLOW}${DEFAULT_PASS}${RESET}"
-echo -e "------------------------------------------"
