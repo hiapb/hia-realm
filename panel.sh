@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==========================================
-# Realm 转发面板 (稳定修复版)
+# Realm 转发面板 (v3.7 架构优化版)
 # ==========================================
 
 # --- 配置 ---
@@ -23,7 +23,16 @@ YELLOW="\033[33m"
 CYAN="\033[36m"
 RESET="\033[0m"
 
-# 动画函数
+# 1. 关键逻辑：安装时检测 IPv6 环境
+# 如果文件存在且不为空，说明有 V6 地址
+if [ -s "/proc/net/if_inet6" ]; then
+    IPV6_FLAG="true"
+    IPV6_MSG="检测到 IPv6 环境 (已开启)"
+else
+    IPV6_FLAG="false"
+    IPV6_MSG="无 IPv6 环境 (已禁用添加 V6 目标)"
+fi
+
 spinner() {
     local pid=$1
     local delay=0.1
@@ -53,29 +62,28 @@ fi
 
 clear
 echo -e "${GREEN}==========================================${RESET}"
-echo -e "${GREEN}   Realm 转发面板 (v3.6 稳定版) 一键部署   ${RESET}"
+echo -e "${GREEN}   Realm 面板 (环境预检测版) 一键部署     ${RESET}"
 echo -e "${GREEN}==========================================${RESET}"
+echo -e "${YELLOW}提示: ${IPV6_MSG}${RESET}"
 
-# 1. 环境准备
+# 2. 环境准备
 if [ -f /etc/debian_version ]; then
-    run_step "更新系统软件源" "apt-get update -y"
-    run_step "安装系统基础依赖" "apt-get install -y curl wget tar build-essential pkg-config libssl-dev"
+    run_step "更新依赖" "apt-get update -y && apt-get install -y curl wget tar build-essential pkg-config libssl-dev"
 elif [ -f /etc/redhat-release ]; then
-    run_step "安装开发工具包" "yum groupinstall -y 'Development Tools'"
-    run_step "安装基础依赖" "yum install -y curl wget tar openssl-devel"
+    run_step "更新依赖" "yum groupinstall -y 'Development Tools' && yum install -y curl wget tar openssl-devel"
 fi
 
 if ! command -v cargo &> /dev/null; then
-    echo -e -n "${CYAN}>>> 安装 Rust 编译器 (约需 1-2 分钟)...${RESET}"
+    echo -e -n "${CYAN}>>> 安装 Rust...${RESET}"
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y >/dev/null 2>&1 &
     spinner $!
     echo -e "${GREEN} [完成]${RESET}"
     source "$HOME/.cargo/env"
 fi
 
-# 2. Realm 主程序
+# 3. Realm 主程序
 if [ ! -f "$REALM_BIN" ]; then
-    echo -e -n "${CYAN}>>> 下载并安装 Realm 主程序...${RESET}"
+    echo -e -n "${CYAN}>>> 安装 Realm...${RESET}"
     ARCH=$(uname -m)
     if [[ "$ARCH" == "x86_64" ]]; then
         URL="https://github.com/zhboner/realm/releases/latest/download/realm-x86_64-unknown-linux-gnu.tar.gz"
@@ -98,14 +106,14 @@ if [ ! -f "$REALM_BIN" ]; then
 fi
 mkdir -p "$(dirname "$REALM_CONFIG")"
 
-# 3. 生成代码
+# 4. 生成代码 (纯净版，无第三方网络库)
 run_step "生成 Rust 源代码" "rm -rf '$WORK_DIR' && mkdir -p '$WORK_DIR/src'"
 cd "$WORK_DIR"
 
 cat > Cargo.toml <<EOF
 [package]
 name = "realm-panel"
-version = "3.6.0"
+version = "3.7.0"
 edition = "2021"
 
 [dependencies]
@@ -128,7 +136,7 @@ use axum::{
     Json, Router, Form,
 };
 use serde::{Deserialize, Serialize};
-use std::{fs, process::Command, sync::{Arc, Mutex}, path::Path, time::{Duration, Instant}};
+use std::{fs, process::Command, sync::{Arc, Mutex}, time::{Duration, Instant}};
 use tower_cookies::{Cookie, Cookies, CookieManagerLayer};
 
 const REALM_CONFIG: &str = "/etc/realm/config.toml";
@@ -170,17 +178,14 @@ async fn main() {
         .layer(CookieManagerLayer::new())
         .with_state(state);
     let port = std::env::var("PANEL_PORT").unwrap_or_else(|_| "4794".to_string());
-    println!("Listening on port {}", port);
+    println!("Listening on {}", port);
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 
-// 简单粗暴的 V6 检测
-fn has_ipv6() -> bool {
-    if let Ok(content) = fs::read_to_string("/proc/net/if_inet6") {
-        return !content.trim().is_empty();
-    }
-    false
+// 核心：从环境变量读取是否支持 V6
+fn has_ipv6_env() -> bool {
+    std::env::var("ENABLE_IPV6").unwrap_or("false".to_string()) == "true"
 }
 
 fn load_or_init_data() -> AppData {
@@ -201,6 +206,7 @@ fn save_config_toml(data: &AppData) {
         if !l.contains(':') { l = format!("0.0.0.0:{}", l); }
         RealmEndpoint { name: r.name.clone(), listen: l, remote: r.remote.clone(), r#type: "tcp+udp".to_string() }
     }).collect();
+    // 保活机制
     if endpoints.is_empty() {
         endpoints.push(RealmEndpoint { name: "keepalive".to_string(), listen: "127.0.0.1:65534".to_string(), remote: "127.0.0.1:65534".to_string(), r#type: "tcp+udp".to_string() });
     }
@@ -237,8 +243,9 @@ async fn get_rules(c: Cookies, State(s): State<Arc<AppState>>) -> Response {
 #[derive(Deserialize)] struct AddRuleReq { name: String, listen: String, remote: String }
 async fn add_rule(c: Cookies, State(s): State<Arc<AppState>>, Json(req): Json<AddRuleReq>) -> Response {
     let mut d = s.data.lock().unwrap(); if !check_auth(&c, &d) { return StatusCode::UNAUTHORIZED.into_response(); }
+    // V6 环境变量判断
     if req.remote.contains('[') || req.remote.matches(':').count() > 1 {
-        if !has_ipv6() { return (StatusCode::BAD_REQUEST, "本机无外网IPv6环境，禁止添加IPv6目标！").into_response(); }
+        if !has_ipv6_env() { return (StatusCode::BAD_REQUEST, "本机无外网IPv6环境，禁止添加IPv6目标！").into_response(); }
     }
     d.rules.push(Rule { id: uuid::Uuid::new_v4().to_string(), name: req.name, listen: req.listen, remote: req.remote, enabled: true });
     save_json(&d); save_config_toml(&d); Json(serde_json::json!({"status":"ok"})).into_response()
@@ -293,20 +300,18 @@ const DASHBOARD_HTML: &str = r#"
 "#;
 EOF
 
-echo -e -n "${CYAN}>>> 编译面板程序 (Port: ${PANEL_PORT})...${RESET}"
-cargo build --release >/dev/null 2>&1 &
-spinner $!
-echo -e "${GREEN} [完成]${RESET}"
-
+echo -e -n "${CYAN}>>> 正在编译 (Port: ${PANEL_PORT})...${RESET}"
+cargo build --release 
 if [ -f "target/release/realm-panel" ]; then
     mv target/release/realm-panel "$BINARY_PATH"
 else
-    echo -e "${RED}编译失败，请检查环境${RESET}"
+    echo -e "${RED} [编译失败] 请检查上方错误日志${RESET}"
     exit 1
 fi
 
 rm -rf "$WORK_DIR"
 
+# 5. 配置 Systemd 服务 (写入环境变量)
 cat > /etc/systemd/system/realm-panel.service <<EOF
 [Unit]
 Description=Realm Panel
@@ -317,6 +322,8 @@ User=root
 Environment="PANEL_USER=$DEFAULT_USER"
 Environment="PANEL_PASS=$DEFAULT_PASS"
 Environment="PANEL_PORT=$PANEL_PORT"
+# 关键：将安装时检测到的 IPv6 状态写入环境变量
+Environment="ENABLE_IPV6=$IPV6_FLAG"
 ExecStart=$BINARY_PATH
 Restart=always
 
@@ -339,5 +346,6 @@ echo -e " 管理地址 : ${YELLOW}http://${IP}:${PANEL_PORT}${RESET}"
 echo -e " 用户名   : ${YELLOW}${DEFAULT_USER}${RESET}"
 echo -e " 密码     : ${YELLOW}${DEFAULT_PASS}${RESET}"
 echo -e "-------------------------------------------------"
+echo -e " IPv6环境 : ${YELLOW}${IPV6_MSG}${RESET}"
 echo -e " 功能状态 : [智能保活] [V6拦截] [雷达诊断] [UI优化]"
 echo -e "${GREEN}=================================================${RESET}"
