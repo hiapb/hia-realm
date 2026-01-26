@@ -568,7 +568,7 @@ EOF
 sed -i '/\[dependencies\]/a uuid = { version = "1", features = ["v4"] }' Cargo.toml
 
 # 7. 编译
-echo -e "${GREEN}>>> 开始编译 (Pro版功能较多，需等待约 3-5 分钟)...${RESET}"
+echo -e "${GREEN}>>> 开始编译 (需等待约 3-5 分钟)...${RESET}"
 cargo build --release
 
 # 8. 安装
