@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # ==========================================
-# Realm Pro 面板 (Rust 全功能版)
+# Realm 转发面板
 # ==========================================
 
 # --- 默认配置 ---
-PANEL_PORT="8080"
+PANEL_PORT="19794"
 DEFAULT_USER="admin"
 DEFAULT_PASS="123456"
 
@@ -14,7 +14,7 @@ REALM_BIN="/usr/local/bin/realm"
 REALM_CONFIG="/etc/realm/config.toml"
 WORK_DIR="/opt/realm_panel_pro"
 BINARY_PATH="/usr/local/bin/realm-panel"
-DATA_FILE="/etc/realm/panel_data.json" # 面板专属数据库
+DATA_FILE="/etc/realm/panel_data.json" 
 
 # --- 颜色 ---
 GREEN="\033[32m"
@@ -28,7 +28,7 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-echo -e "${GREEN}>>> 正在部署 Realm Pro (Rust 全功能版)...${RESET}"
+echo -e "${GREEN}>>> 正在部署 Realm 转发面板...${RESET}"
 
 # 2. 安装编译环境
 echo -e "${YELLOW}正在检查编译环境...${RESET}"
@@ -350,7 +350,6 @@ async fn update_admin(cookies: Cookies, State(state): State<Arc<AppState>>, Json
     Json(serde_json::json!({"status":"ok"})).into_response()
 }
 
-// --- HTML 模板 ---
 
 const LOGIN_HTML: &str = r#"
 <!DOCTYPE html>
@@ -417,7 +416,7 @@ td { padding: 14px 12px; border-bottom: 1px solid #e5e7eb; vertical-align: middl
 </head>
 <body>
 <div class="navbar">
-    <div class="logo"><i class="fas fa-network-wired"></i> Realm Pro</div>
+    <div class="logo"><i class="fas fa-network-wired"></i> Realm 转发面板</div>
     <div style="display:flex; gap:10px; align-items:center">
         <span><i class="fas fa-user"></i> {{USER}}</span>
         <button class="btn" style="background:#e5e7eb; color:#374151" onclick="openAdmin()">设置</button>
@@ -528,7 +527,6 @@ async function del(id) {
     loadRules();
 }
 
-// Edit Modal Logic
 function openEdit(id) {
     const r = rules.find(x => x.id === id);
     document.getElementById('edit_id').value = r.id;
@@ -547,7 +545,7 @@ async function saveEdit() {
     loadRules();
 }
 
-// Admin Modal Logic
+
 function openAdmin() { document.getElementById('adminModal').style.display = 'flex'; }
 async function saveAdmin() {
     const u = document.getElementById('admin_user').value;
@@ -615,7 +613,7 @@ systemctl restart realm-panel
 IP=$(curl -s4 ifconfig.me || hostname -I | awk '{print $1}')
 echo -e ""
 echo -e "${GREEN}==========================================${RESET}"
-echo -e "${GREEN}🎉 Realm Pro 面板 (Rust) 部署成功！${RESET}"
+echo -e "${GREEN}🎉 Realm 转发面板 (Rust) 部署成功！${RESET}"
 echo -e "${GREEN}==========================================${RESET}"
 echo -e "访问地址 : ${YELLOW}http://${IP}:${PANEL_PORT}${RESET}"
 echo -e "默认用户 : ${YELLOW}${DEFAULT_USER}${RESET}"
