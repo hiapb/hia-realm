@@ -2,7 +2,7 @@
 
 # --- 配置 ---
 URL_AMD="https://github.com/hiapb/hia-realm/releases/download/realm/realm-panel-amd.tar.gz"
-URL_ARM="" 
+URL_ARM="https://github.com/hiapb/hia-realm/releases/download/realm/realm-panel-arm.tar.gz" 
 
 PANEL_PORT="4794"
 DEFAULT_USER="admin"
