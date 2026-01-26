@@ -48,7 +48,7 @@ fi
 
 clear
 echo -e "${GREEN}==========================================${RESET}"
-echo -e "${GREEN}Realm 面板 (UI 最终修正版)   ${RESET}"
+echo -e "${GREEN}Realm 面板 一键部署${RESET}"
 echo -e "${GREEN}==========================================${RESET}"
 
 # 1. 环境准备
@@ -367,11 +367,9 @@ const DASHBOARD_HTML: &str = r#"
 thead th{position:sticky;top:0;background:rgba(255,255,255,0.4);backdrop-filter:blur(15px);z-index:5;padding:14px 12px;text-align:left;font-size:0.85rem;text-transform:uppercase;letter-spacing:1px;color:#6b7280;border:1px solid rgba(255,255,255,0.3)}
 thead th:first-child{border-top-left-radius:15px;border-bottom-left-radius:15px;border-right:none}
 thead th:last-child{border-top-right-radius:15px;border-bottom-right-radius:15px;border-left:none}
-/* PC端 Rule 样式：确保右侧也有圆角 */
 tbody tr{background:rgba(255,255,255,0.4);transition:0.3s}
 tbody tr:hover{background:rgba(255,255,255,0.7);transform:translateY(-1px);box-shadow:0 4px 10px rgba(0,0,0,0.02)}
 td{padding:14px 12px;font-size:0.92rem;font-weight:500;color:var(--text-main)}
-/* 核心圆角修正：PC端规则四个角 */
 td:first-child{border-top-left-radius:15px;border-bottom-left-radius:15px}
 td:last-child{border-top-right-radius:15px;border-bottom-right-radius:15px}
 .btn{padding:8px 12px;border-radius:10px;border:none;cursor:pointer;color:white;transition:0.2s;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-weight:500}.btn-primary{background:var(--primary);opacity:0.9}.btn-danger{background:var(--danger);opacity:0.9}.btn-gray{background:rgba(0,0,0,0.05);color:var(--text-main)}.grid-input{display:grid;grid-template-columns:1.5fr 1fr 2fr auto;gap:12px}input{padding:10px 14px;border:1px solid rgba(0,0,0,0.05);background:rgba(255,255,255,0.5);border-radius:10px;outline:none;transition:0.3s;color:var(--text-main);font-weight:500}input:focus{border-color:var(--primary);background:white}.status-dot{height:7px;width:7px;border-radius:50%;display:inline-block;margin-right:8px}.bg-green{background:var(--success);box-shadow:0 0 8px var(--success)}.bg-gray{background:#9ca3af}.modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.1);z-index:100;justify-content:center;align-items:center;backdrop-filter:blur(8px)}.modal-box{background:rgba(255,255,255,0.9);width:90%;max-width:420px;padding:2rem;border-radius:20px;box-shadow:0 20px 40px rgba(0,0,0,0.1);animation:pop 0.3s ease}@keyframes pop{from{transform:scale(0.9);opacity:0}to{transform:scale(1);opacity:1}}.tab-header{display:flex;gap:20px;margin-bottom:20px;border-bottom:1px solid rgba(0,0,0,0.05)}.tab-btn{padding:10px 5px;cursor:pointer;font-size:0.9rem;color:#9ca3af}.tab-btn.active{color:var(--primary);border-bottom:2px solid var(--primary);font-weight:600}.tab-content{display:none}.tab-content.active{display:block}label{display:block;margin:12px 0 6px;font-size:0.85rem;color:#6b7280}@media(max-width:768px){.grid-input{grid-template-columns:1fr}.navbar{padding:0.8rem 1rem}.nav-text{display:none}thead{display:none}tbody tr{display:flex;flex-direction:column;border-radius:18px!important;margin-bottom:12px;padding:15px;border:1px solid rgba(255,255,255,0.3)}td{padding:6px 0;display:flex;justify-content:space-between;border-radius:0!important;align-items:center}td::before{content:attr(data-label);color:#9ca3af;font-size:0.85rem}
@@ -381,7 +379,7 @@ td[data-label="操作"] .btn{flex:none;width:auto;padding:6px 12px}}</style></he
 EOF
 
 # 4. 编译安装
-echo -e -n "${CYAN}>>> 编译面板程序 (优化版)...${RESET}"
+echo -e -n "${CYAN}>>> 编译面板程序 (请耐心等待！)...${RESET}"
 cargo build --release >/dev/null 2>&1 &
 spinner $!
 
