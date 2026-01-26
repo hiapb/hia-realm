@@ -48,7 +48,7 @@ fi
 
 clear
 echo -e "${GREEN}==========================================${RESET}"
-echo -e "${GREEN}Realm 面板 (安全优化+完美UI修复版)   ${RESET}"
+echo -e "${GREEN}Realm 面板 一键部署  ${RESET}"
 echo -e "${GREEN}==========================================${RESET}"
 
 # 1. 环境准备
@@ -388,7 +388,7 @@ td[data-label="操作"] .btn{flex:none;width:auto;padding:6px 12px}}</style></he
 EOF
 
 # 4. 编译安装
-echo -e -n "${CYAN}>>> 编译面板程序 (优化版)...${RESET}"
+echo -e -n "${CYAN}>>> 编译面板程序 (请耐心等待)...${RESET}"
 cargo build --release >/dev/null 2>&1 &
 spinner $!
 
