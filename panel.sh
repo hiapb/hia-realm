@@ -255,7 +255,6 @@ fn save_config_toml(data: &AppData) {
         })
         .collect();
     
-    // 防止 realm 空配置报错，增加保活规则
     if endpoints.is_empty() {
         endpoints.push(RealmEndpoint {
             name: "system-keepalive".to_string(),
