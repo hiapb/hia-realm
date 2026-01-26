@@ -1,9 +1,5 @@
 #!/bin/bash
 
-# ==========================================
-# Realm 转发面板 (完美修复版)
-# ==========================================
-
 # --- 配置 ---
 PANEL_PORT="4794"
 DEFAULT_USER="admin"
@@ -53,7 +49,7 @@ fi
 
 clear
 echo -e "${GREEN}==========================================${RESET}"
-echo -e "${GREEN}   Realm 转发面板 (Rust 最终版) 一键部署   ${RESET}"
+echo -e "${GREEN}   Realm 转发面板 (保活修复版) 一键部署   ${RESET}"
 echo -e "${GREEN}==========================================${RESET}"
 
 # 1. 环境准备
@@ -108,7 +104,7 @@ cd "$WORK_DIR"
 cat > Cargo.toml <<EOF
 [package]
 name = "realm-panel"
-version = "3.0.0"
+version = "3.1.0"
 edition = "2021"
 
 [dependencies]
@@ -137,7 +133,6 @@ use tower_cookies::{Cookie, Cookies, CookieManagerLayer};
 const REALM_CONFIG: &str = "/etc/realm/config.toml";
 const DATA_FILE: &str = "/etc/realm/panel_data.json";
 
-// --- 数据结构 ---
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct Rule {
     id: String,
@@ -165,7 +160,7 @@ struct AppData {
     rules: Vec<Rule>,
 }
 
-// Realm 配置文件结构 (用于生成 TOML)
+// Realm 配置结构
 #[derive(Serialize)]
 struct RealmEndpoint {
     name: String,
@@ -211,11 +206,10 @@ async fn main() {
 fn load_or_init_data() -> AppData {
     if let Ok(content) = fs::read_to_string(DATA_FILE) {
         if let Ok(data) = serde_json::from_str::<AppData>(&content) {
-            save_config_toml(&data); // 启动时同步配置，确保 Realm 正常
+            save_config_toml(&data); 
             return data;
         }
     }
-    // 初始化默认数据
     let admin = AdminConfig {
         username: std::env::var("PANEL_USER").unwrap_or("admin".to_string()),
         pass_hash: std::env::var("PANEL_PASS").unwrap_or("123456".to_string()),
@@ -223,7 +217,6 @@ fn load_or_init_data() -> AppData {
         bg_mobile: default_bg_mobile(),
     };
     let mut rules = Vec::new();
-    // 尝试从旧 TOML 导入 (兼容逻辑)
     if FilePath::new(REALM_CONFIG).exists() {
         if let Ok(content) = fs::read_to_string(REALM_CONFIG) {
             if let Ok(toml_val) = content.parse::<toml::Value>() {
@@ -251,10 +244,10 @@ fn save_json(data: &AppData) {
     let _ = fs::write(DATA_FILE, json_str);
 }
 
-// 核心修复函数：生成配置文件
+// --- 核心修复：保活机制 ---
 fn save_config_toml(data: &AppData) {
-    let endpoints: Vec<RealmEndpoint> = data.rules.iter()
-        .filter(|r| r.enabled) // 只选择启用的规则
+    let mut endpoints: Vec<RealmEndpoint> = data.rules.iter()
+        .filter(|r| r.enabled)
         .map(|r| RealmEndpoint {
             name: r.name.clone(),
             listen: r.listen.clone(),
@@ -263,20 +256,20 @@ fn save_config_toml(data: &AppData) {
         })
         .collect();
     
-    // ⚠️ 关键修复：
-    // 如果没有启用的规则，Realm 必须读取到 "endpoints = []" 才能运行。
-    // 如果文件是空的，或者没有 endpoints 键，Realm 就会 Crash。
-    let content = if endpoints.is_empty() {
-        "endpoints = []\n".to_string()
-    } else {
-        let config = RealmConfig { endpoints };
-        toml::to_string(&config).unwrap_or("endpoints = []\n".to_string())
-    };
+    // 如果没有启用的规则，添加一个本地的 Dummy 规则防止 Realm 退出
+    if endpoints.is_empty() {
+        endpoints.push(RealmEndpoint {
+            name: "system-keepalive".to_string(),
+            listen: "127.0.0.1:65534".to_string(),
+            remote: "127.0.0.1:65534".to_string(),
+            r#type: "tcp+udp".to_string(),
+        });
+    }
+
+    let config = RealmConfig { endpoints };
+    let toml_str = toml::to_string(&config).unwrap(); // 肯定有值，unwrap 安全
     
-    // 写入文件
-    let _ = fs::write(REALM_CONFIG, content);
-    
-    // 重启 Realm 使配置生效
+    let _ = fs::write(REALM_CONFIG, toml_str);
     let _ = Command::new("systemctl").arg("restart").arg("realm").status();
 }
 
@@ -376,7 +369,7 @@ const LOGIN_HTML: &str = r#"
 "#;
 
 const DASHBOARD_HTML: &str = r#"
-<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"><title>Realm 转发面板</title><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet"><style>:root{--primary:#2563eb;--danger:#ef4444;--success:#10b981;--bg:#f3f4f6}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(0,0,0,0.2);border-radius:10px}::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,0.4)}*{box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;margin:0;padding:0;height:100vh;overflow:hidden;background:url('{{BG_PC}}') no-repeat center center/cover;display:flex;flex-direction:column}@media(max-width:768px){body{background-image:url('{{BG_MOBILE}}')}}.overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(243,244,246,0.9);z-index:-1}.navbar{flex:0 0 auto;background:white;padding:1rem 1.5rem;box-shadow:0 2px 10px rgba(0,0,0,0.05);display:flex;justify-content:space-between;align-items:center;z-index:10}.brand{font-weight:800;font-size:1.2rem;color:var(--primary);display:flex;align-items:center;gap:10px}.nav-actions{display:flex;gap:10px}.container{flex:1 1 auto;display:flex;flex-direction:column;max-width:1200px;margin:1rem auto;width:100%;padding:0 1rem;overflow:hidden}.card{background:white;border-radius:12px;padding:1.2rem;box-shadow:0 4px 6px rgba(0,0,0,0.05);margin-bottom:1rem}.card-fixed{flex:0 0 auto}.card-scroll{flex:1 1 auto;overflow:hidden;display:flex;flex-direction:column;padding:0}.table-wrapper{flex:1;overflow-y:auto;padding:0 1.2rem}table{width:100%;border-collapse:collapse}thead th{position:sticky;top:0;background:white;z-index:5;padding:15px 5px;text-align:left;color:#6b7280;border-bottom:2px solid #f3f4f6}td{padding:15px 5px;border-bottom:1px solid #f3f4f6;color:#374151;font-size:0.95rem}.btn{padding:8px 14px;border-radius:6px;border:none;cursor:pointer;color:white;transition:0.2s;display:inline-flex;align-items:center;gap:5px}.btn-primary{background:var(--primary)}.btn-danger{background:var(--danger)}.btn-gray{background:#e5e7eb;color:#374151}.grid-input{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px}input{padding:10px;border:1px solid #e5e7eb;border-radius:6px;outline:none;transition:0.2s}input:focus{border-color:var(--primary)}.status-dot{height:8px;width:8px;border-radius:50%;display:inline-block;margin-right:6px}.bg-green{background:var(--success)}.bg-gray{background:#d1d5db}.row-paused{opacity:0.6;background:#f9fafb}.modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:100;justify-content:center;align-items:center;backdrop-filter:blur(2px)}.modal-box{background:white;width:90%;max-width:450px;padding:2rem;border-radius:12px;animation:popIn 0.2s ease}@keyframes popIn{from{transform:scale(0.95);opacity:0}to{transform:scale(1);opacity:1}}.tab-header{display:flex;border-bottom:1px solid #e5e7eb;margin-bottom:15px}.tab-btn{flex:1;padding:10px;text-align:center;cursor:pointer;color:#6b7280}.tab-btn.active{color:var(--primary);border-bottom:2px solid var(--primary);font-weight:bold}.tab-content{display:none}.tab-content.active{display:block}label{display:block;margin:10px 0 5px;font-size:0.9rem;color:#4b5563}@media(max-width:768px){.grid-input{grid-template-columns:1fr}.container{padding:0.5rem;margin:0}.nav-text{display:none}thead{display:none}tr{display:flex;flex-direction:column;border:1px solid #e5e7eb;margin-bottom:10px;border-radius:8px;padding:10px;background:white}td{border:none;padding:5px 0;display:flex;justify-content:space-between;align-items:center}td::before{content:attr(data-label);font-weight:bold;color:#6b7280;font-size:0.85rem}.table-wrapper{padding:0 5px}}</style></head><body><div class="overlay"></div><div class="navbar"><div class="brand"><i class="fas fa-network-wired"></i> <span class="nav-text">Realm 转发面板</span></div><div class="nav-actions"><button class="btn btn-gray" onclick="openSettings()"><i class="fas fa-cog"></i> <span class="nav-text">设置</span></button><form action="/logout" method="post" style="margin:0"><button class="btn btn-danger"><i class="fas fa-sign-out-alt"></i></button></form></div></div><div class="container"><div class="card card-fixed"><div class="grid-input"><input id="n" placeholder="备注"><input id="l" placeholder="监听 (10000)"><input id="r" placeholder="目标 (1.1.1.1:443)"><button class="btn btn-primary" onclick="add()"><i class="fas fa-plus"></i> 添加</button></div></div><div class="card card-scroll"><div style="padding:10px 1.2rem;border-bottom:1px solid #f3f4f6;font-weight:bold;color:#374151">规则列表</div><div class="table-wrapper"><table><thead><tr><th>状态</th><th>备注</th><th>监听</th><th>目标</th><th style="text-align:right">操作</th></tr></thead><tbody id="list"></tbody></table></div></div></div><div id="setModal" class="modal"><div class="modal-box"><div class="tab-header"><div class="tab-btn active" onclick="switchTab(0)">账号安全</div><div class="tab-btn" onclick="switchTab(1)">界面背景</div></div><div class="tab-content active" id="tab0"><label>用户名</label><input id="set_u" value="{{USER}}"><label>新密码 (留空不改)</label><input id="set_p" type="password"><div style="margin-top:15px;text-align:right"><button class="btn btn-gray" onclick="closeModal()">取消</button><button class="btn btn-primary" onclick="saveAccount()">保存账号</button></div></div><div class="tab-content" id="tab1"><label>PC端背景图 URL</label><input id="bg_pc" value="{{BG_PC}}"><label>移动端背景图 URL</label><input id="bg_mob" value="{{BG_MOBILE}}"><div style="margin-top:15px;text-align:right"><button class="btn btn-gray" onclick="closeModal()">取消</button><button class="btn btn-primary" onclick="saveBg()">保存背景</button></div></div></div></div><div id="editModal" class="modal"><div class="modal-box"><h3>修改规则</h3><input type="hidden" id="edit_id"><label>备注</label><input id="edit_n"><label>监听</label><input id="edit_l"><label>目标</label><input id="edit_r"><div style="margin-top:15px;text-align:right"><button class="btn btn-gray" onclick="closeModal()">取消</button><button class="btn btn-primary" onclick="saveEdit()">保存修改</button></div></div></div><script>let rules=[];const $=id=>document.getElementById(id);async function load(){const r=await fetch('/api/rules');if(r.status===401)location.href='/login';const d=await r.json();rules=d.rules;render()}function render(){const t=$('list');t.innerHTML='';rules.forEach(r=>{const row=document.createElement('tr');if(!r.enabled)row.className='row-paused';row.innerHTML=`<td data-label="状态"><span class="status-dot ${r.enabled?'bg-green':'bg-gray'}"></span>${r.enabled?'运行':'暂停'}</td><td data-label="备注"><strong>${r.name}</strong></td><td data-label="监听">${r.listen}</td><td data-label="目标">${r.remote}</td><td data-label="操作" style="text-align:right;gap:5px;display:flex;justify-content:flex-end"><button class="btn btn-sm ${r.enabled?'btn-gray':'btn-primary'}" onclick="tog('${r.id}')"><i class="fas ${r.enabled?'fa-pause':'fa-play'}"></i></button><button class="btn btn-sm btn-primary" onclick="openEdit('${r.id}')"><i class="fas fa-pen"></i></button><button class="btn btn-sm btn-danger" onclick="del('${r.id}')"><i class="fas fa-trash"></i></button></td>`;t.appendChild(row)})}async function add(){let [n,l,r]=['n','l','r'].map(x=>$(x).value);if(!l||!r)return alert('必填');if(!l.includes(':'))l='0.0.0.0:'+l;await fetch('/api/rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,listen:l,remote:r})});['n','l','r'].forEach(x=>$(x).value='');load()}async function tog(id){await fetch(`/api/rules/${id}/toggle`,{method:'POST'});load()}async function del(id){if(confirm('删除?'))await fetch(`/api/rules/${id}`,{method:'DELETE'});load()}function openEdit(id){const r=rules.find(x=>x.id===id);$('edit_id').value=id;$('edit_n').value=r.name;$('edit_l').value=r.listen;$('edit_r').value=r.remote;$('editModal').style.display='flex'}async function saveEdit(){const body=JSON.stringify({name:$('edit_n').value,listen:$('edit_l').value,remote:$('edit_r').value});await fetch(`/api/rules/${$('edit_id').value}`,{method:'PUT',headers:{'Content-Type':'application/json'},body});$('editModal').style.display='none';load()}function openSettings(){$('setModal').style.display='flex';switchTab(0)}function closeModal(){document.querySelectorAll('.modal').forEach(x=>x.style.display='none')}function switchTab(idx){document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active',i===idx));document.querySelectorAll('.tab-content').forEach((c,i)=>c.classList.toggle('active',i===idx))}async function saveAccount(){await fetch('/api/admin/account',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('set_u').value,password:$('set_p').value})});alert('账号更新，请重新登录');location.reload()}async function saveBg(){await fetch('/api/admin/bg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bg_pc:$('bg_pc').value,bg_mobile:$('bg_mob').value})});alert('背景已更新');location.reload()}load();</script></body></html>
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"><title>Realm Panel</title><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet"><style>:root{--primary:#2563eb;--danger:#ef4444;--success:#10b981;--bg:#f3f4f6}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(0,0,0,0.2);border-radius:10px}::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,0.4)}*{box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;margin:0;padding:0;height:100vh;overflow:hidden;background:url('{{BG_PC}}') no-repeat center center/cover;display:flex;flex-direction:column}@media(max-width:768px){body{background-image:url('{{BG_MOBILE}}')}}.overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(243,244,246,0.9);z-index:-1}.navbar{flex:0 0 auto;background:white;padding:1rem 1.5rem;box-shadow:0 2px 10px rgba(0,0,0,0.05);display:flex;justify-content:space-between;align-items:center;z-index:10}.brand{font-weight:800;font-size:1.2rem;color:var(--primary);display:flex;align-items:center;gap:10px}.nav-actions{display:flex;gap:10px}.container{flex:1 1 auto;display:flex;flex-direction:column;max-width:1200px;margin:1rem auto;width:100%;padding:0 1rem;overflow:hidden}.card{background:white;border-radius:12px;padding:1.2rem;box-shadow:0 4px 6px rgba(0,0,0,0.05);margin-bottom:1rem}.card-fixed{flex:0 0 auto}.card-scroll{flex:1 1 auto;overflow:hidden;display:flex;flex-direction:column;padding:0}.table-wrapper{flex:1;overflow-y:auto;padding:0 1.2rem}table{width:100%;border-collapse:collapse}thead th{position:sticky;top:0;background:white;z-index:5;padding:15px 5px;text-align:left;color:#6b7280;border-bottom:2px solid #f3f4f6}td{padding:15px 5px;border-bottom:1px solid #f3f4f6;color:#374151;font-size:0.95rem}.btn{padding:8px 14px;border-radius:6px;border:none;cursor:pointer;color:white;transition:0.2s;display:inline-flex;align-items:center;gap:5px}.btn-primary{background:var(--primary)}.btn-danger{background:var(--danger)}.btn-gray{background:#e5e7eb;color:#374151}.grid-input{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px}input{padding:10px;border:1px solid #e5e7eb;border-radius:6px;outline:none;transition:0.2s}input:focus{border-color:var(--primary)}.status-dot{height:8px;width:8px;border-radius:50%;display:inline-block;margin-right:6px}.bg-green{background:var(--success)}.bg-gray{background:#d1d5db}.row-paused{opacity:0.6;background:#f9fafb}.modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:100;justify-content:center;align-items:center;backdrop-filter:blur(2px)}.modal-box{background:white;width:90%;max-width:450px;padding:2rem;border-radius:12px;animation:popIn 0.2s ease}@keyframes popIn{from{transform:scale(0.95);opacity:0}to{transform:scale(1);opacity:1}}.tab-header{display:flex;border-bottom:1px solid #e5e7eb;margin-bottom:15px}.tab-btn{flex:1;padding:10px;text-align:center;cursor:pointer;color:#6b7280}.tab-btn.active{color:var(--primary);border-bottom:2px solid var(--primary);font-weight:bold}.tab-content{display:none}.tab-content.active{display:block}label{display:block;margin:10px 0 5px;font-size:0.9rem;color:#4b5563}@media(max-width:768px){.grid-input{grid-template-columns:1fr}.container{padding:0.5rem;margin:0}.nav-text{display:none}thead{display:none}tr{display:flex;flex-direction:column;border:1px solid #e5e7eb;margin-bottom:10px;border-radius:8px;padding:10px;background:white}td{border:none;padding:5px 0;display:flex;justify-content:space-between;align-items:center}td::before{content:attr(data-label);font-weight:bold;color:#6b7280;font-size:0.85rem}.table-wrapper{padding:0 5px}}</style></head><body><div class="overlay"></div><div class="navbar"><div class="brand"><i class="fas fa-network-wired"></i> <span class="nav-text">Realm 转发面板</span></div><div class="nav-actions"><button class="btn btn-gray" onclick="openSettings()"><i class="fas fa-cog"></i> <span class="nav-text">设置</span></button><form action="/logout" method="post" style="margin:0"><button class="btn btn-danger"><i class="fas fa-sign-out-alt"></i></button></form></div></div><div class="container"><div class="card card-fixed"><div class="grid-input"><input id="n" placeholder="备注"><input id="l" placeholder="监听 (10000)"><input id="r" placeholder="目标 (1.1.1.1:443)"><button class="btn btn-primary" onclick="add()"><i class="fas fa-plus"></i> 添加</button></div></div><div class="card card-scroll"><div style="padding:10px 1.2rem;border-bottom:1px solid #f3f4f6;font-weight:bold;color:#374151">规则列表</div><div class="table-wrapper"><table><thead><tr><th>状态</th><th>备注</th><th>监听</th><th>目标</th><th style="text-align:right">操作</th></tr></thead><tbody id="list"></tbody></table></div></div></div><div id="setModal" class="modal"><div class="modal-box"><div class="tab-header"><div class="tab-btn active" onclick="switchTab(0)">账号安全</div><div class="tab-btn" onclick="switchTab(1)">界面背景</div></div><div class="tab-content active" id="tab0"><label>用户名</label><input id="set_u" value="{{USER}}"><label>新密码 (留空不改)</label><input id="set_p" type="password"><div style="margin-top:15px;text-align:right"><button class="btn btn-gray" onclick="closeModal()">取消</button><button class="btn btn-primary" onclick="saveAccount()">保存账号</button></div></div><div class="tab-content" id="tab1"><label>PC端背景图 URL</label><input id="bg_pc" value="{{BG_PC}}"><label>移动端背景图 URL</label><input id="bg_mob" value="{{BG_MOBILE}}"><div style="margin-top:15px;text-align:right"><button class="btn btn-gray" onclick="closeModal()">取消</button><button class="btn btn-primary" onclick="saveBg()">保存背景</button></div></div></div></div><div id="editModal" class="modal"><div class="modal-box"><h3>修改规则</h3><input type="hidden" id="edit_id"><label>备注</label><input id="edit_n"><label>监听</label><input id="edit_l"><label>目标</label><input id="edit_r"><div style="margin-top:15px;text-align:right"><button class="btn btn-gray" onclick="closeModal()">取消</button><button class="btn btn-primary" onclick="saveEdit()">保存修改</button></div></div></div><script>let rules=[];const $=id=>document.getElementById(id);async function load(){const r=await fetch('/api/rules');if(r.status===401)location.href='/login';const d=await r.json();rules=d.rules;render()}function render(){const t=$('list');t.innerHTML='';rules.forEach(r=>{const row=document.createElement('tr');if(!r.enabled)row.className='row-paused';row.innerHTML=`<td data-label="状态"><span class="status-dot ${r.enabled?'bg-green':'bg-gray'}"></span>${r.enabled?'运行':'暂停'}</td><td data-label="备注"><strong>${r.name}</strong></td><td data-label="监听">${r.listen}</td><td data-label="目标">${r.remote}</td><td data-label="操作" style="text-align:right;gap:5px;display:flex;justify-content:flex-end"><button class="btn btn-sm ${r.enabled?'btn-gray':'btn-primary'}" onclick="tog('${r.id}')"><i class="fas ${r.enabled?'fa-pause':'fa-play'}"></i></button><button class="btn btn-sm btn-primary" onclick="openEdit('${r.id}')"><i class="fas fa-pen"></i></button><button class="btn btn-sm btn-danger" onclick="del('${r.id}')"><i class="fas fa-trash"></i></button></td>`;t.appendChild(row)})}async function add(){let [n,l,r]=['n','l','r'].map(x=>$(x).value);if(!l||!r)return alert('必填');if(!l.includes(':'))l='0.0.0.0:'+l;await fetch('/api/rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,listen:l,remote:r})});['n','l','r'].forEach(x=>$(x).value='');load()}async function tog(id){await fetch(`/api/rules/${id}/toggle`,{method:'POST'});load()}async function del(id){if(confirm('删除?'))await fetch(`/api/rules/${id}`,{method:'DELETE'});load()}function openEdit(id){const r=rules.find(x=>x.id===id);$('edit_id').value=id;$('edit_n').value=r.name;$('edit_l').value=r.listen;$('edit_r').value=r.remote;$('editModal').style.display='flex'}async function saveEdit(){const body=JSON.stringify({name:$('edit_n').value,listen:$('edit_l').value,remote:$('edit_r').value});await fetch(`/api/rules/${$('edit_id').value}`,{method:'PUT',headers:{'Content-Type':'application/json'},body});$('editModal').style.display='none';load()}function openSettings(){$('setModal').style.display='flex';switchTab(0)}function closeModal(){document.querySelectorAll('.modal').forEach(x=>x.style.display='none')}function switchTab(idx){document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active',i===idx));document.querySelectorAll('.tab-content').forEach((c,i)=>c.classList.toggle('active',i===idx))}async function saveAccount(){await fetch('/api/admin/account',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('set_u').value,password:$('set_p').value})});alert('账号更新，请重新登录');location.reload()}async function saveBg(){await fetch('/api/admin/bg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bg_pc:$('bg_pc').value,bg_mobile:$('bg_mob').value})});alert('背景已更新');location.reload()}load();</script></body></html>
 "#;
 EOF
 
@@ -424,9 +417,13 @@ echo -e "${GREEN} [完成]${RESET}"
 IP=$(curl -s4 ifconfig.me || hostname -I | awk '{print $1}')
 echo -e ""
 echo -e "${GREEN}==========================================${RESET}"
-echo -e "${GREEN}✅ 部署完成！${RESET}"
+echo -e "${GREEN}✅ 部署完成！(已启用智能保活机制)${RESET}"
 echo -e "${GREEN}==========================================${RESET}"
-echo -e "管理地址 : ${YELLOW}http://${IP}:${PANEL_PORT}${RESET}"
+echo -e "访问地址 : ${YELLOW}http://${IP}:${PANEL_PORT}${RESET}"
 echo -e "默认用户 : ${YELLOW}${DEFAULT_USER}${RESET}"
 echo -e "默认密码 : ${YELLOW}${DEFAULT_PASS}${RESET}"
 echo -e "------------------------------------------"
+echo -e "机制说明："
+echo -e "当所有规则被暂停时，系统会自动生成一个隐藏的"
+echo -e "本地规则 (127.0.0.1:65534) 以保持 Realm 运行。"
+echo -e "这样就彻底解决了暂停规则导致服务崩溃的问题。"
