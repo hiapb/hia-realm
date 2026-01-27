@@ -898,6 +898,44 @@ install_ftp(){
     sleep 2
     exit 0
 }
+
+update_panel_port() {
+    if [ ! -f "/etc/systemd/system/realm-panel.service" ]; then
+        echo -e "${RED}检测到面板尚未安装，请先安装面板！${RESET}"
+        return
+    fi
+
+    echo -e "--------------------"
+    echo -e "${GREEN}修改 Web 面板访问端口${RESET}"
+    read -p "请输入新的端口号 (1-65535): " new_port
+
+    if ! [[ "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -lt 1 ] || [ "$new_port" -gt 65535 ]; then
+        echo -e "${RED}输入无效，端口必须是 1 到 65535 之间的数字。${RESET}"
+        return
+    fi
+
+    if command -v ss >/dev/null 2>&1; then
+        if ss -lntu | grep -q ":${new_port} "; then
+            echo -e "${RED}错误：端口 $new_port 似乎已被系统其他程序占用。${RESET}"
+            return
+        fi
+    fi
+
+    echo -e "${YELLOW}正在更新配置...${RESET}"
+
+    sed -i "s|Environment=\"PANEL_PORT=.*\"|Environment=\"PANEL_PORT=$new_port\"|g" /etc/systemd/system/realm-panel.service
+
+    systemctl daemon-reload
+    if systemctl restart realm-panel; then
+        local IP
+        IP=$(curl -s4 ifconfig.me || hostname -I | awk '{print $1}')
+        echo -e "${GREEN}✅ 端口修改成功！${RESET}"
+        echo -e "新的访问地址: ${YELLOW}http://${IP}:${new_port}${RESET}"
+    else
+        echo -e "${RED}修改失败，面板服务无法重启，请检查日志。${RESET}"
+    fi
+}
+
 manage_panel() {
     echo "--------------------"
     echo "Realm 面板管理："
@@ -912,11 +950,13 @@ manage_panel() {
             echo "选择安装方式："
             echo "1. 快速安装部署"
             echo "2. 自编译部署"
+            echo "3. 修改面板端口" 
             echo "0. 返回"
             read -p "请选择 [0-2]: " INST_OPT
             case "$INST_OPT" in
                 1) bash <(curl -fsSL https://raw.githubusercontent.com/hiapb/hia-realm/main/quickpanel.sh) ;;
                 2) bash <(curl -fsSL https://raw.githubusercontent.com/hiapb/hia-realm/main/panel.sh) ;;
+                3) update_panel_port ;;
                 *) return ;;
             esac
             ;;
