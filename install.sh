@@ -941,6 +941,7 @@ manage_panel() {
     echo "Realm 面板管理："
     echo "1. 安装面板"
     echo "2. 卸载面板"
+    echo "3. 修改面板端口" 
     echo "0. 返回"
     read -p "请选择 [0-2]: " PAN_OPT
 
@@ -950,19 +951,18 @@ manage_panel() {
             echo "选择安装方式："
             echo "1. 快速安装部署"
             echo "2. 自编译部署"
-            echo "3. 修改面板端口" 
             echo "0. 返回"
             read -p "请选择 [0-2]: " INST_OPT
             case "$INST_OPT" in
                 1) bash <(curl -fsSL https://raw.githubusercontent.com/hiapb/hia-realm/main/quickpanel.sh) ;;
                 2) bash <(curl -fsSL https://raw.githubusercontent.com/hiapb/hia-realm/main/panel.sh) ;;
-                3) update_panel_port ;;
                 *) return ;;
             esac
             ;;
         2)
             bash <(curl -fsSL https://raw.githubusercontent.com/hiapb/hia-realm/main/unipan.sh)
             ;;
+        3) update_panel_port ;;
         *) return ;;
     esac
 }
