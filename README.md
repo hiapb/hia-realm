@@ -379,6 +379,7 @@ http://<你的服务器IP>:4794
 
 - 登录鉴权（cookie session）
 - 可视化管理规则：添加 / 编辑 / 删除 / 启停
+- 一键删除，批量添加，一键导出/导入
 - 端口冲突检测（同端口禁止重复）
 - 可在面板设置里修改：
   - 管理账户（用户名 / 密码）
@@ -405,7 +406,6 @@ http://<你的服务器IP>:4794
 ![PC主页][2]
 ![移动端][3]
 ![移动端][4]
-![移动端][5]
 
 ## 常用路径
 
@@ -499,7 +499,6 @@ GitHub：`https://github.com/hiapb/hia-realm`
 
 
   [1]: https://img.inim.im/file/1769474192912_image.png
-  [2]: https://img.inim.im/file/1769475036877_image.png
+  [2]: https://img.inim.im/file/1769571313682_image.png
   [3]: https://img.inim.im/file/1769448797447_IMG_3111.jpeg
-  [4]: https://img.inim.im/file/1769448803386_IMG_3112.jpeg
-  [5]: https://img.inim.im/file/1769448796822_IMG_3114.jpeg
+  [4]: https://img.inim.im/file/1769571366750_IMG_3126.jpeg
