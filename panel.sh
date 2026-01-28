@@ -48,8 +48,7 @@ fi
 
 clear
 echo -e "${GREEN}==========================================${RESET}"
-echo -e "${GREEN}Realm 面板 (完美修复版) 一键部署  ${RESET}"
-echo -e "${GREEN}修复: 隐藏系统保活规则${RESET}"
+echo -e "${GREEN}Realm 面板 一键部署  ${RESET}"
 echo -e "${GREEN}==========================================${RESET}"
 
 # 1. 环境准备
@@ -229,14 +228,12 @@ fn load_or_init_data() -> AppData {
     };
     let mut rules = Vec::new();
 
-    // 3. 尝试从 TOML 导入 (如果是首次运行或JSON丢失)
     if FilePath::new(REALM_CONFIG).exists() {
         if let Ok(content) = fs::read_to_string(REALM_CONFIG) {
             if let Ok(toml_val) = content.parse::<toml::Value>() {
                  if let Some(endpoints) = toml_val.get("endpoints").and_then(|v| v.as_array()) {
                      for ep in endpoints {
                          let name = ep.get("name").and_then(|v| v.as_str()).unwrap_or("Imported").to_string();
-                         // --- 关键修复: 导入时忽略保活规则 ---
                          if name == "system-keepalive" { continue; }
                          // --------------------------------
                          let listen = ep.get("listen").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -271,7 +268,6 @@ fn save_config_toml(data: &AppData) {
         })
         .collect();
     
-    // 如果没有用户规则，添加隐藏的保活规则，防止 realm 报错
     if endpoints.is_empty() {
         endpoints.push(RealmEndpoint {
             name: "system-keepalive".to_string(),
@@ -373,12 +369,11 @@ async fn batch_add_rules(cookies: Cookies, State(state): State<Arc<AppState>>, J
     Json(serde_json::json!({"status":"ok", "message": format!("成功添加 {} 条规则", added_count)})).into_response()
 }
 
-// 导出备份 (后端保护)
+
 async fn download_backup(cookies: Cookies, State(state): State<Arc<AppState>>) -> Response {
     let data = state.data.lock().unwrap();
     if !check_auth(&cookies, &data) { return StatusCode::UNAUTHORIZED.into_response(); }
     
-    // 如果没有规则，返回错误提示
     if data.rules.is_empty() {
          return Json(serde_json::json!({"status":"error", "message": "当前没有规则，无法导出"})).into_response();
     }
@@ -391,13 +386,12 @@ async fn download_backup(cookies: Cookies, State(state): State<Arc<AppState>>) -
         .unwrap()
 }
 
-// 导入恢复
+
 async fn restore_backup(cookies: Cookies, State(state): State<Arc<AppState>>, Json(backup_rules): Json<Vec<Rule>>) -> Response {
     let mut data = state.data.lock().unwrap();
     if !check_auth(&cookies, &data) { return StatusCode::UNAUTHORIZED.into_response(); }
     if backup_rules.is_empty() { return Json(serde_json::json!({"status": "error", "message": "导入的数据为空"})).into_response(); }
     
-    // --- 恢复时也执行一次清洗，防止备份文件里含有 keepalive ---
     let mut clean_rules = backup_rules;
     clean_rules.retain(|r| r.name != "system-keepalive");
     // ---------------------------------------------------
@@ -477,7 +471,6 @@ async function add(){
     ['n','l','r'].forEach(x=>$(x).value='');load()
 }
 async function tog(id){await fetch(`/api/rules/${id}/toggle`,{method:'POST'});load()}async function del(id){if(confirm('确定删除此规则吗？'))await fetch(`/api/rules/${id}`,{method:'DELETE'});load()}function openEdit(id){const r=rules.find(x=>x.id===id);$('edit_id').value=id;$('edit_n').value=r.name;let listen = r.listen;if(listen.startsWith('0.0.0.0:')) listen = listen.replace('0.0.0.0:', '');$('edit_l').value=listen;$('edit_r').value=r.remote;$('editModal').style.display='flex'}async function saveEdit(){let l = $('edit_l').value;if(!l.includes(':')) l = '0.0.0.0:' + l;const body=JSON.stringify({name:$('edit_n').value,listen:l,remote:$('edit_r').value});const res = await fetch(`/api/rules/${$('edit_id').value}`,{method:'PUT',headers:{'Content-Type':'application/json'},body});const d = await res.json();if(d.status === 'error') { alert(d.message); return; }$('editModal').style.display='none';load()}function openSettings(){$('setModal').style.display='flex';switchTab(0)}function closeModal(){document.querySelectorAll('.modal').forEach(x=>x.style.display='none')}function switchTab(idx){document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active',i===idx));document.querySelectorAll('.tab-content').forEach((c,i)=>c.classList.toggle('active',i===idx))}async function saveAccount(){await fetch('/api/admin/account',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('set_u').value,password:$('set_p').value})});alert('账户已更新，请重新登录');location.reload()}async function saveBg(){await fetch('/api/admin/bg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bg_pc:$('bg_pc').value,bg_mobile:$('bg_mob').value})});location.reload()}async function doLogout(){await fetch('/logout',{method:'POST'});location.href='/login'}
-// --- 新增功能 JS ---
 function openBatch(){$('batchModal').style.display='flex';$('batch_input').value='';$('batch_input').focus();}
 async function saveBatch(){const raw = $('batch_input').value;if(!raw.trim()) return;const lines = raw.split('\n');const payload = [];for(let line of lines){line = line.trim();if(!line) continue;line = line.replace(/，/g, ',');const parts = line.split(',');if(parts.length < 3) continue;let [n, l, r] = [parts[0].trim(), parts[1].trim(), parts[2].trim()];if(l && !l.includes(':')) l = '0.0.0.0:' + l;if(n && l && r){payload.push({ name: n, listen: l, remote: r });}}if(payload.length === 0){alert('没有识别到有效的规则，请检查格式');return;}const btn = event.target;const oldText = btn.innerText;btn.innerText = '导入中...';btn.disabled = true;try {const res = await fetch('/api/rules/batch', {method: 'POST',headers: {'Content-Type': 'application/json'},body: JSON.stringify(payload)});const d = await res.json();alert(d.message);$('batchModal').style.display='none';load();} catch(e) {alert('导入失败: ' + e);} finally {btn.innerText = oldText;btn.disabled = false;}}
 function downloadBackup() {
@@ -492,7 +485,6 @@ EOF
 
 # 4. 编译安装
 echo -e -n "${CYAN}>>> 编译面板程序 (请耐心等待！)...${RESET}"
-# 强制使用系统链接器以修复 Debian 环境下的链接错误
 mkdir -p .cargo
 cat > .cargo/config.toml <<EOF
 [target.x86_64-unknown-linux-gnu]
