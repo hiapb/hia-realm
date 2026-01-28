@@ -51,10 +51,16 @@ echo -e "${GREEN}==========================================${RESET}"
 echo -e "${GREEN}Realm 面板 一键部署  ${RESET}"
 echo -e "${GREEN}==========================================${RESET}"
 
-# 1. 环境准备
+# 1. 环境准备 (自动适配架构依赖)
+OS_ARCH=$(uname -m)
 if [ -f /etc/debian_version ]; then
     run_step "更新系统软件源" "apt-get update -y"
-    run_step "安装系统基础依赖" "apt-get install -y curl wget tar build-essential pkg-config libssl-dev gcc-multilib"
+    # ARM 架构通常不需要 gcc-multilib，且安装可能报错，这里做区分
+    if [[ "$OS_ARCH" == "x86_64" ]]; then
+        run_step "安装系统基础依赖" "apt-get install -y curl wget tar build-essential pkg-config libssl-dev gcc-multilib"
+    else
+        run_step "安装系统基础依赖" "apt-get install -y curl wget tar build-essential pkg-config libssl-dev"
+    fi
 elif [ -f /etc/redhat-release ]; then
     run_step "安装开发工具包" "yum groupinstall -y 'Development Tools'"
     run_step "安装基础依赖" "yum install -y curl wget tar openssl-devel libgcc glibc-static"
@@ -71,13 +77,12 @@ fi
 # 2. Realm 主程序
 if [ ! -f "$REALM_BIN" ]; then
     echo -e -n "${CYAN}>>> 下载并安装 Realm 主程序...${RESET}"
-    ARCH=$(uname -m)
-    if [[ "$ARCH" == "x86_64" ]]; then
+    if [[ "$OS_ARCH" == "x86_64" ]]; then
         URL="https://github.com/zhboner/realm/releases/latest/download/realm-x86_64-unknown-linux-gnu.tar.gz"
-    elif [[ "$ARCH" == "aarch64" ]]; then
+    elif [[ "$OS_ARCH" == "aarch64" ]]; then
         URL="https://github.com/zhboner/realm/releases/latest/download/realm-aarch64-unknown-linux-gnu.tar.gz"
     else
-        echo -e "${RED}不支持架构: $ARCH${RESET}"
+        echo -e "${RED}不支持架构: $OS_ARCH${RESET}"
         exit 1
     fi
     mkdir -p /tmp/realm_tmp
@@ -103,7 +108,7 @@ cd "$WORK_DIR"
 cat > Cargo.toml <<EOF
 [package]
 name = "realm-panel"
-version = "3.4.6"
+version = "3.4.7"
 edition = "2021"
 
 [dependencies]
@@ -467,7 +472,6 @@ async function add(){
     if(!l) return alert('请输入监听端口');
     if(!r) return alert('请输入目标地址');
     if(!l.includes(':'))l='0.0.0.0:'+l;
-    
     const res = await fetch('/api/rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,listen:l,remote:r})});
     const d = await res.json();
     if(d.status === 'error') { alert(d.message); return; }
@@ -478,7 +482,7 @@ function openBatch(){$('batchModal').style.display='flex';$('batch_input').value
 async function saveBatch(){const raw = $('batch_input').value;if(!raw.trim()) return;const lines = raw.split('\n');const payload = [];for(let line of lines){line = line.trim();if(!line) continue;line = line.replace(/，/g, ',');const parts = line.split(',');if(parts.length < 3) continue;let [n, l, r] = [parts[0].trim(), parts[1].trim(), parts[2].trim()];if(l && !l.includes(':')) l = '0.0.0.0:' + l;if(n && l && r){payload.push({ name: n, listen: l, remote: r });}}if(payload.length === 0){alert('没有识别到有效的规则，请检查格式');return;}const btn = event.target;const oldText = btn.innerText;btn.innerText = '导入中...';btn.disabled = true;try {const res = await fetch('/api/rules/batch', {method: 'POST',headers: {'Content-Type': 'application/json'},body: JSON.stringify(payload)});const d = await res.json();alert(d.message);$('batchModal').style.display='none';load();} catch(e) {alert('导入失败: ' + e);} finally {btn.innerText = oldText;btn.disabled = false;}}
 async function delAll() {
     if(rules.length === 0) return alert('当前没有规则，无需删除');
-    if(!confirm('⚠️确定要清空所有规则吗？\n此操作不可恢复！')) return;
+    if(!confirm('⚠️ 确定要清空所有规则吗？\n此操作不可恢复！')) return;
     const res = await fetch('/api/rules/all', { method: 'DELETE' });
     const d = await res.json();
     alert(d.message);
@@ -496,9 +500,16 @@ EOF
 
 # 4. 编译安装
 echo -e -n "${CYAN}>>> 编译面板程序 (请耐心等待！)...${RESET}"
+OS_ARCH=$(uname -m)
+if [[ "$OS_ARCH" == "aarch64" ]]; then
+    RUST_TRIPLE="aarch64-unknown-linux-gnu"
+else
+    RUST_TRIPLE="x86_64-unknown-linux-gnu"
+fi
+
 mkdir -p .cargo
 cat > .cargo/config.toml <<EOF
-[target.x86_64-unknown-linux-gnu]
+[target.$RUST_TRIPLE]
 linker = "gcc"
 rustflags = ["-C", "link-arg=-fuse-ld=bfd"]
 EOF
