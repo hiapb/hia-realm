@@ -48,7 +48,8 @@ fi
 
 clear
 echo -e "${GREEN}==========================================${RESET}"
-echo -e "${GREEN}Realm 面板 一键部署  ${RESET}"
+echo -e "${GREEN}Realm 面板 (完美修复版) 一键部署  ${RESET}"
+echo -e "${GREEN}修复: 隐藏系统保活规则${RESET}"
 echo -e "${GREEN}==========================================${RESET}"
 
 # 1. 环境准备
@@ -103,7 +104,7 @@ cd "$WORK_DIR"
 cat > Cargo.toml <<EOF
 [package]
 name = "realm-panel"
-version = "3.4.2"
+version = "3.4.3"
 edition = "2021"
 
 [dependencies]
@@ -204,12 +205,22 @@ async fn main() {
 }
 
 fn load_or_init_data() -> AppData {
+    // 1. 尝试从 JSON 加载
     if let Ok(content) = fs::read_to_string(DATA_FILE) {
-        if let Ok(data) = serde_json::from_str::<AppData>(&content) {
+        if let Ok(mut data) = serde_json::from_str::<AppData>(&content) {
+            // --- 自动清洗: 移除 system-keepalive ---
+            let original_len = data.rules.len();
+            data.rules.retain(|r| r.name != "system-keepalive");
+            if data.rules.len() != original_len {
+                save_json(&data); // 如果有清洗，立即保存回 JSON
+            }
+            // ------------------------------------
             save_config_toml(&data); 
             return data;
         }
     }
+    
+    // 2. 初始化默认值
     let admin = AdminConfig {
         username: std::env::var("PANEL_USER").unwrap_or("admin".to_string()),
         pass_hash: std::env::var("PANEL_PASS").unwrap_or("123456".to_string()),
@@ -217,12 +228,17 @@ fn load_or_init_data() -> AppData {
         bg_mobile: default_bg_mobile(),
     };
     let mut rules = Vec::new();
+
+    // 3. 尝试从 TOML 导入 (如果是首次运行或JSON丢失)
     if FilePath::new(REALM_CONFIG).exists() {
         if let Ok(content) = fs::read_to_string(REALM_CONFIG) {
             if let Ok(toml_val) = content.parse::<toml::Value>() {
                  if let Some(endpoints) = toml_val.get("endpoints").and_then(|v| v.as_array()) {
                      for ep in endpoints {
                          let name = ep.get("name").and_then(|v| v.as_str()).unwrap_or("Imported").to_string();
+                         // --- 关键修复: 导入时忽略保活规则 ---
+                         if name == "system-keepalive" { continue; }
+                         // --------------------------------
                          let listen = ep.get("listen").and_then(|v| v.as_str()).unwrap_or("").to_string();
                          let remote = ep.get("remote").and_then(|v| v.as_str()).unwrap_or("").to_string();
                          if !listen.is_empty() && !remote.is_empty() {
@@ -255,6 +271,7 @@ fn save_config_toml(data: &AppData) {
         })
         .collect();
     
+    // 如果没有用户规则，添加隐藏的保活规则，防止 realm 报错
     if endpoints.is_empty() {
         endpoints.push(RealmEndpoint {
             name: "system-keepalive".to_string(),
@@ -356,11 +373,12 @@ async fn batch_add_rules(cookies: Cookies, State(state): State<Arc<AppState>>, J
     Json(serde_json::json!({"status":"ok", "message": format!("成功添加 {} 条规则", added_count)})).into_response()
 }
 
-// 导出备份 
+// 导出备份 (后端保护)
 async fn download_backup(cookies: Cookies, State(state): State<Arc<AppState>>) -> Response {
     let data = state.data.lock().unwrap();
     if !check_auth(&cookies, &data) { return StatusCode::UNAUTHORIZED.into_response(); }
     
+    // 如果没有规则，返回错误提示
     if data.rules.is_empty() {
          return Json(serde_json::json!({"status":"error", "message": "当前没有规则，无法导出"})).into_response();
     }
@@ -378,7 +396,13 @@ async fn restore_backup(cookies: Cookies, State(state): State<Arc<AppState>>, Js
     let mut data = state.data.lock().unwrap();
     if !check_auth(&cookies, &data) { return StatusCode::UNAUTHORIZED.into_response(); }
     if backup_rules.is_empty() { return Json(serde_json::json!({"status": "error", "message": "导入的数据为空"})).into_response(); }
-    data.rules = backup_rules;
+    
+    // --- 恢复时也执行一次清洗，防止备份文件里含有 keepalive ---
+    let mut clean_rules = backup_rules;
+    clean_rules.retain(|r| r.name != "system-keepalive");
+    // ---------------------------------------------------
+    
+    data.rules = clean_rules;
     save_json(&data); save_config_toml(&data);
     Json(serde_json::json!({"status":"ok", "message": format!("成功恢复 {} 条规则", data.rules.len())})).into_response()
 }
@@ -468,6 +492,7 @@ EOF
 
 # 4. 编译安装
 echo -e -n "${CYAN}>>> 编译面板程序 (请耐心等待！)...${RESET}"
+# 强制使用系统链接器以修复 Debian 环境下的链接错误
 mkdir -p .cargo
 cat > .cargo/config.toml <<EOF
 [target.x86_64-unknown-linux-gnu]
