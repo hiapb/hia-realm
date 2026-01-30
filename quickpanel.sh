@@ -1,20 +1,16 @@
 #!/bin/bash
 
-# --- 基础配置 ---
 URL_AMD="https://github.com/hiapb/hia-realm/releases/download/realm/realm-panel-amd.tar.gz"
 URL_ARM="https://github.com/hiapb/hia-realm/releases/download/realm/realm-panel-arm.tar.gz"
 
-# 默认设置 
 PANEL_PORT="4794"
 DEFAULT_USER="admin"
 DEFAULT_PASS="123456"
 
-# --- 路径变量 ---
 BINARY_PATH="/usr/local/bin/realm-panel"
 SERVICE_FILE="/etc/systemd/system/realm-panel.service"
 DATA_FILE="/etc/realm/panel_data.json"
 
-# --- 颜色定义 ---
 GREEN="\033[32m"
 RED="\033[31m"
 YELLOW="\033[33m"
@@ -25,30 +21,24 @@ echo -e "${GREEN}==========================================${RESET}"
 echo -e "${GREEN}             Realm 面板 一键部署          ${RESET}"
 echo -e "${GREEN}==========================================${RESET}"
 
-echo -e "${CYAN}>>> 正在检测历史安装信息...${RESET}"
-
-if [ -f "$DATA_FILE" ]; then
+if [ -f "$DATA_FILE" ] && [ -f "$SERVICE_FILE" ]; then
+    echo -e "${CYAN}>>> 检测到历史安装信息...${RESET}"
+    
     OLD_USER=$(grep '"username":' "$DATA_FILE" | awk -F'"' '{print $4}')
     OLD_PASS=$(grep '"pass_hash":' "$DATA_FILE" | awk -F'"' '{print $4}')
-    
+    OLD_PORT=$(grep "PANEL_PORT=" "$SERVICE_FILE" | sed 's/.*PANEL_PORT=\([0-9]*\).*/\1/')
+
     if [ -n "$OLD_USER" ] && [ -n "$OLD_PASS" ]; then
         DEFAULT_USER="$OLD_USER"
         DEFAULT_PASS="$OLD_PASS"
-        echo -e "    检测到已存账号: ${GREEN}$DEFAULT_USER${RESET}"
-        echo -e "    检测到已存密码: ${GREEN}(已保留)${RESET}"
+        echo -e "    已保留账号: ${GREEN}$DEFAULT_USER${RESET}"
     fi
-fi
 
-if [ -f "$SERVICE_FILE" ]; then
-    OLD_PORT=$(grep "Environment=\"PANEL_PORT=" "$SERVICE_FILE" | cut -d'=' -f2 | tr -d '"')
     if [ -n "$OLD_PORT" ]; then
         PANEL_PORT="$OLD_PORT"
-        echo -e "    检测到自定义端口: ${GREEN}$PANEL_PORT${RESET}"
+        echo -e "    已保留端口: ${GREEN}$PANEL_PORT${RESET}"
     fi
-else
-    echo -e "    未检测到旧服务，使用默认配置。"
 fi
-
 
 ARCH=$(uname -m)
 DOWNLOAD_URL=""
@@ -61,11 +51,6 @@ elif [ "$ARCH" == "aarch64" ]; then
     DOWNLOAD_URL=$URL_ARM
 else
     echo -e "${RED} [错误] 不支持的系统架构: $ARCH${RESET}"
-    exit 1
-fi
-
-if [ -z "$DOWNLOAD_URL" ]; then
-    echo -e "${RED} [错误] 尚未配置此架构的下载链接，请检查脚本配置。${RESET}"
     exit 1
 fi
 
@@ -92,7 +77,6 @@ tar -xzvf /tmp/realm-panel.tar.gz -C /usr/local/bin/ >/dev/null 2>&1
 chmod +x "$BINARY_PATH"
 rm -f /tmp/realm-panel.tar.gz
 echo -e "${GREEN} [完成]${RESET}"
-
 
 if ip -6 addr show scope global | grep -q "inet6"; then
     HAS_IPV6="true"
@@ -121,10 +105,11 @@ EOF
 systemctl daemon-reload
 systemctl enable realm-panel >/dev/null 2>&1
 systemctl restart realm-panel >/dev/null 2>&1
+
 IP=$(curl -s4 ifconfig.me || hostname -I | awk '{print $1}')
 echo -e ""
 echo -e "${GREEN}==========================================${RESET}"
-echo -e "${GREEN}          ✅ Realm 转发面板部署成功!         ${RESET}"
+echo -e "${GREEN}✅ Realm 转发面板部署成功!${RESET}"
 echo -e "${GREEN}==========================================${RESET}"
 echo -e "访问地址 : ${YELLOW}http://${IP}:${PANEL_PORT}${RESET}"
 echo -e "当前用户 : ${YELLOW}${DEFAULT_USER}${RESET}"
