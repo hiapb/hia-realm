@@ -236,9 +236,9 @@ install_realm() {
 }
 
 uninstall_realm() {
-  echo -e "${YELLOW}正在卸载 Realm 面板...${RESET}"
+  echo -e "${YELLOW}开始卸载 Realm 面板...${RESET}"
   bash <(curl -fsSL https://raw.githubusercontent.com/hiapb/hia-realm/main/unipan.sh)
-  echo -e "${YELLOW}正在卸载 Realm 主程序...${RESET}"
+  echo -e "${YELLOW}开始卸载 Realm 主程序...${RESET}"
   systemctl stop realm >/dev/null 2>&1 || true
   systemctl disable realm >/dev/null 2>&1 || true
   rm -f "$REALM_BIN" "$SERVICE_FILE" "$CONFIG_FILE"
