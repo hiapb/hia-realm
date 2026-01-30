@@ -23,7 +23,7 @@ CYAN="\033[36m"
 RESET="\033[0m"
 # =========================================
 
-# 自定义链名称 (核心修正：使用自定义链防止污染主链)
+
 CHAIN_IN="REALM_IN"
 CHAIN_OUT="REALM_OUT"
 
@@ -153,29 +153,34 @@ install_realm_smart() {
     elif [ "$latest_ver" == "$local_ver" ]; then
         echo -e "${GREEN}本地 Realm 已是最新版 ($local_ver)，跳过安装${RESET}"
         ensure_config_file
-        if [ -f "$SERVICE_FILE" ]; then return 0; fi
-        echo -e "${YELLOW}服务配置丢失，正在修复...${RESET}"
+        # 强制更新 Service 文件以确保 ExecReload 存在
+        echo -e "${YELLOW}更新服务配置以支持热重载...${RESET}"
     else
         echo -e "${YELLOW}发现新版本: $latest_ver (当前: $local_ver)，准备更新...${RESET}"
     fi
 
     local url
     url="$(get_latest_realm_url || true)"
-    if [ -z "$url" ]; then echo -e "${RED}获取下载链接失败${RESET}"; exit 1; fi
-
-    echo -e "${GREEN}下载地址：$url${RESET}"
-    mkdir -p "$TMP_DIR"
-    cd "$TMP_DIR" || exit 1
-    rm -f realm.tar.gz realm
-
-    if ! curl -L -o realm.tar.gz "$url"; then echo -e "${RED}下载失败${RESET}"; exit 1; fi
     
-    tar -xzf realm.tar.gz
-    if [ ! -f "realm" ]; then echo -e "${RED}解压失败${RESET}"; exit 1; fi
+    # 仅当需要下载文件时执行
+    if [ "$local_ver" != "$latest_ver" ] || [ ! -f "$REALM_BIN" ]; then
+        if [ -z "$url" ]; then echo -e "${RED}获取下载链接失败${RESET}"; exit 1; fi
+        echo -e "${GREEN}下载地址：$url${RESET}"
+        mkdir -p "$TMP_DIR"
+        cd "$TMP_DIR" || exit 1
+        rm -f realm.tar.gz realm
 
-    systemctl stop realm >/dev/null 2>&1
-    mv realm "$REALM_BIN"
-    chmod +x "$REALM_BIN"
+        if ! curl -L -o realm.tar.gz "$url"; then echo -e "${RED}下载失败${RESET}"; exit 1; fi
+        
+        tar -xzf realm.tar.gz
+        if [ ! -f "realm" ]; then echo -e "${RED}解压失败${RESET}"; exit 1; fi
+
+        systemctl stop realm >/dev/null 2>&1
+        mv realm "$REALM_BIN"
+        chmod +x "$REALM_BIN"
+        cd ~
+        rm -rf "$TMP_DIR"
+    fi
 
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
@@ -185,6 +190,7 @@ Wants=network-online.target
 
 [Service]
 ExecStart=$REALM_BIN -c $CONFIG_FILE
+ExecReload=/bin/kill -USR1 \$MAINPID
 Restart=always
 LimitNOFILE=1048576
 LimitNPROC=1048576
@@ -196,10 +202,11 @@ EOF
     ensure_config_file
     systemctl daemon-reload
     systemctl enable realm >/dev/null 2>&1 || true
-    systemctl restart realm
-    echo -e "${GREEN}Realm 安装完成${RESET}"
-    cd ~
-    rm -rf "$TMP_DIR"
+    # 如果服务未运行则启动
+    if ! systemctl is-active --quiet realm; then
+        systemctl start realm
+    fi
+    echo -e "${GREEN}Realm 安装/配置更新完成${RESET}"
 }
 
 if [ "$EUID" -ne 0 ]; then
@@ -208,7 +215,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 clear
-echo -e "${GREEN}=============================== ===${RESET}"
+echo -e "${GREEN}===================================${RESET}"
 echo -e "${GREEN}          Realm 面板 一键部署        ${RESET}"
 echo -e "${GREEN}===================================${RESET}"
 
@@ -225,7 +232,7 @@ cd "$WORK_DIR"
 cat > Cargo.toml <<EOF
 [package]
 name = "realm-panel"
-version = "3.9.0"
+version = "3.9.1"
 edition = "2021"
 
 [dependencies]
@@ -370,7 +377,6 @@ async fn main() {
 }
 
 fn init_firewall_chains() {
-    // 创建自定义链
     let _ = Command::new("iptables").args(["-N", CHAIN_IN]).status();
     let _ = Command::new("iptables").args(["-N", CHAIN_OUT]).status();
 
@@ -393,7 +399,6 @@ fn flush_realm_chains() {
 fn get_port(listen: &str) -> String {
     listen.split(':').last().unwrap_or("").trim().to_string()
 }
-
 
 fn add_iptables_rule(rule: &Rule) {
     let port = get_port(&rule.listen);
@@ -485,11 +490,9 @@ fn update_traffic_and_check(state: &Arc<AppState>) {
         let curr = *current_counters.get(&port).unwrap_or(&TrafficStats{in_bytes:0, out_bytes:0});
         let last = *last_map.get(&port).unwrap_or(&TrafficStats{in_bytes:0, out_bytes:0});
 
-        // 增量计算 (处理 iptables 重置或溢出的情况)
         let delta_in = if curr.in_bytes >= last.in_bytes { curr.in_bytes - last.in_bytes } else { curr.in_bytes };
         let delta_out = if curr.out_bytes >= last.out_bytes { curr.out_bytes - last.out_bytes } else { curr.out_bytes };
 
-        // 计费核心：Max(In, Out)
         let usage_inc = cmp::max(delta_in, delta_out);
 
         if usage_inc > 0 {
@@ -521,7 +524,6 @@ fn update_traffic_and_check(state: &Arc<AppState>) {
     }
 }
 
-// --------------------------------------------------------
 
 fn load_or_init_data() -> AppData {
     if let Ok(content) = fs::read_to_string(DATA_FILE) {
@@ -570,8 +572,8 @@ fn save_config_toml(data: &AppData) {
     let config = RealmConfig { endpoints };
     let toml_str = toml::to_string(&config).unwrap();
     let _ = fs::write(REALM_CONFIG, toml_str);
-    
-    let _ = Command::new("systemctl").arg("restart").arg("realm").status();
+   
+    let _ = Command::new("systemctl").arg("reload").arg("realm").status();
 }
 
 fn check_auth(cookies: &Cookies, state: &AppData) -> bool {
@@ -880,7 +882,7 @@ load();window.addEventListener('resize',render);
 "#;
 EOF
 
-echo -e -n "${CYAN}>>> 编译面板程序 (这可能需要几分钟)...${RESET}"
+echo -e -n "${CYAN}>>> 编译面板程序 (请耐心等待！)...${RESET}"
 OS_ARCH=$(uname -m)
 if [[ "$OS_ARCH" == "aarch64" ]]; then
     RUST_TRIPLE="aarch64-unknown-linux-gnu"
@@ -940,7 +942,7 @@ echo -e "${GREEN} [完成]${RESET}"
 IP=$(curl -s4 ifconfig.me || hostname -I | awk '{print $1}')
 echo -e ""
 echo -e "${GREEN}====================================${RESET}"
-echo -e "${GREEN}          ✅ Realm 面板部署成功       ${RESET}"
+echo -e "${GREEN}           ✅ Realm 面板部署         ${RESET}"
 echo -e "${GREEN}====================================${RESET}"
 echo -e "访问地址 : ${YELLOW}http://${IP}:${PANEL_PORT}${RESET}"
 echo -e "默认用户 : ${YELLOW}${DEFAULT_USER}${RESET}"
