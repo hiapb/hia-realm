@@ -24,7 +24,7 @@ rm -f /etc/realm/panel_data.json
 echo -e "${GREEN}[2/5] 程序及数据文件已清理${RESET}"
 
 # 3. 彻底卸载 Rust 环境
-echo -e ">>> 正在卸载 Rust 环境 (rustup & cargo)..."
+echo -e ">>> 正在卸载 Rust 环境..."
 if command -v rustup &> /dev/null; then
     rustup self uninstall -y >/dev/null 2>&1
 fi
