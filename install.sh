@@ -47,12 +47,12 @@ require_installed() {
 
 ensure_config_file() {
   mkdir -p "$(dirname "$CONFIG_FILE")"
-  if [ ! -f "$CONFIG_FILE" ]; then
+  if [ ! -f "$CONFIG_FILE" ] || [ ! -s "$CONFIG_FILE" ]; then
     cat > "$CONFIG_FILE" <<EOF
-# 默认配置
-# 每条规则一个 [[endpoints]] 块
-# 本脚本支持自定义字段 name 用于区分规则（Realm 会忽略未知字段）
-# 暂停规则：脚本会把整段 endpoints 用 # 注释
+[[endpoints]]
+name = "system-keepalive"
+listen = "127.0.0.1:65534"
+remote = "127.0.0.1:65534"
 EOF
   fi
 }
@@ -177,6 +177,24 @@ install_realm_inner() {
 
   echo -e "${GREEN}正在安装 Realm ...${RESET}"
 
+  # --- 修改点 2：执行系统级内核优化 ---
+  echo -e "${YELLOW}正在执行系统内核 LimitNOFILE 优化...${RESET}"
+  if [ ! -f "/etc/sysctl.d/99-realm.conf" ]; then
+      cat > /etc/sysctl.d/99-realm.conf <<EOF
+fs.file-max = 1000000
+fs.inotify.max_user_instances = 8192
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.ip_local_port_range = 1024 65000
+net.ipv4.tcp_max_syn_backlog = 10240
+net.ipv4.tcp_max_tw_buckets = 5000
+net.ipv4.tcp_fastopen = 3
+EOF
+      sysctl -p /etc/sysctl.d/99-realm.conf >/dev/null 2>&1 || true
+  fi
+  # 临时生效
+  ulimit -n 1000000 >/dev/null 2>&1 || true
+  # ----------------------------------
+
   local arch libc file url
   arch="$(get_arch)"
   libc="$(get_libc)"
@@ -211,15 +229,20 @@ install_realm_inner() {
   mv realm "$REALM_BIN"
   chmod +x "$REALM_BIN"
 
+  # --- 修改点 3：优化 Service 配置 (加入 LimitNPROC) ---
   cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Realm Proxy
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 ExecStart=$REALM_BIN -c $CONFIG_FILE
 Restart=always
-LimitNOFILE=1048576
+# 优化文件描述符限制
+LimitNOFILE=1000000
+# 优化进程/线程数限制
+LimitNPROC=1000000
 
 [Install]
 WantedBy=multi-user.target
@@ -231,6 +254,7 @@ EOF
   systemctl restart realm
 
   echo -e "${GREEN}完成。当前版本：$(get_realm_version_short)${RESET}"
+  echo -e "${GREEN}保活规则已添加，服务已自动启动。${RESET}"
 }
 
 install_realm() {
@@ -255,6 +279,8 @@ uninstall_realm() {
   systemctl stop realm >/dev/null 2>&1 || true
   systemctl disable realm >/dev/null 2>&1 || true
   rm -f "$REALM_BIN" "$SERVICE_FILE" "$CONFIG_FILE"
+  # 同时清理内核优化配置
+  rm -f /etc/sysctl.d/99-realm.conf
   systemctl daemon-reexec
   echo -e "${GREEN}Realm 及面板已全部卸载完成。${RESET}"
 }
@@ -308,6 +334,8 @@ build_rules_index() {
     NAME="$(echo "$BLOCK"   | grep -m1 -E '^[[:space:]]*(#\s*)?name'   | cut -d'"' -f2)"
 
     [ -z "$LISTEN" ] || [ -z "$REMOTE" ] || [ -z "$TYPE" ] && continue
+    # 过滤掉 system-keepalive 规则，不显示在列表中
+    [ "$NAME" == "system-keepalive" ] && continue
 
     RULE_STARTS+=("$START")
     RULE_ENDS+=("$END")
@@ -690,7 +718,7 @@ import_rules() {
     echo -e "${RED}导入文件不存在：$IN${RESET}"
     return
   fi
-  
+   
   if ! grep -q -E '^[[:space:]]*(#\s*)?\[\[endpoints\]\]' "$IN"; then
     echo -e "${RED}导入文件不包含 [[endpoints]] 块。${RESET}"
     return
@@ -1012,7 +1040,7 @@ main_menu() {
       13) require_installed && import_rules ;;
       14) require_installed && manage_schedule_backup ;;
       15) require_installed && install_ftp ;;
-      16) require_installed && manage_panel ;;  
+      16) manage_panel ;;  
       *) echo -e "${RED}无效选项。${RESET}" ;;
     esac
   done
