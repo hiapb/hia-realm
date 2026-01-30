@@ -25,10 +25,6 @@ echo -e "${GREEN}==========================================${RESET}"
 echo -e "${GREEN}            Realm 面板 快速部署           ${RESET}"
 echo -e "${GREEN}==========================================${RESET}"
 
-# ==========================================
-# 0. 智能检测旧配置 (关键修改部分)
-# ==========================================
-# 初始化当前使用的变量为默认值
 CURRENT_PORT="$DEFAULT_PORT"
 CURRENT_USER="$DEFAULT_USER"
 CURRENT_PASS="$DEFAULT_PASS"
@@ -36,19 +32,19 @@ CURRENT_PASS="$DEFAULT_PASS"
 if [ -f "$SERVICE_FILE" ]; then
     echo -e ">>> 检测到已安装面板，正在读取旧配置..."
     
-    OLD_PORT=$(grep 'Environment="PANEL_PORT=' "$SERVICE_FILE" | cut -d'=' -f2 | tr -d '"')
+    OLD_PORT=$(grep 'Environment="PANEL_PORT=' "$SERVICE_FILE" | awk -F 'PANEL_PORT=' '{print $2}' | tr -d '"')
     if [ -n "$OLD_PORT" ]; then
         CURRENT_PORT="$OLD_PORT"
         echo -e "    保留端口: ${CYAN}$CURRENT_PORT${RESET}"
     fi
 
-    OLD_USER=$(grep 'Environment="PANEL_USER=' "$SERVICE_FILE" | cut -d'=' -f2 | tr -d '"')
+    OLD_USER=$(grep 'Environment="PANEL_USER=' "$SERVICE_FILE" | awk -F 'PANEL_USER=' '{print $2}' | tr -d '"')
     if [ -n "$OLD_USER" ]; then
         CURRENT_USER="$OLD_USER"
         echo -e "    保留用户: ${CYAN}$CURRENT_USER${RESET}"
     fi
 
-    OLD_PASS=$(grep 'Environment="PANEL_PASS=' "$SERVICE_FILE" | cut -d'=' -f2 | tr -d '"')
+    OLD_PASS=$(grep 'Environment="PANEL_PASS=' "$SERVICE_FILE" | awk -F 'PANEL_PASS=' '{print $2}' | tr -d '"')
     if [ -n "$OLD_PASS" ]; then
         CURRENT_PASS="$OLD_PASS"
         echo -e "    保留密码: ${CYAN}(已隐藏)${RESET}"
@@ -57,7 +53,6 @@ else
     echo -e ">>> 未检测到旧配置，使用默认设置。"
 fi
 
-# 1. 架构检测
 ARCH=$(uname -m)
 DOWNLOAD_URL=""
 
@@ -105,7 +100,7 @@ fi
 
 # 4. 下载并解压面板二进制
 echo -n ">>> 正在更新面板程序..."
-# 先停止服务，防止文件被占用
+
 systemctl stop realm-panel >/dev/null 2>&1
 
 curl -L "$DOWNLOAD_URL" -o /tmp/realm-panel.tar.gz >/dev/null 2>&1
@@ -148,6 +143,7 @@ EOF
 systemctl daemon-reload
 systemctl enable realm-panel >/dev/null 2>&1
 systemctl restart realm-panel >/dev/null 2>&1
+
 
 IP=$(curl -s4 ifconfig.me || hostname -I | awk '{print $1}')
 echo -e ""
