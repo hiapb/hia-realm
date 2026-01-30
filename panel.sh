@@ -1,23 +1,34 @@
 #!/bin/bash
-
-# --- 配置 ---
+# --- 基础配置变量 ---
 PANEL_PORT="4794"
 DEFAULT_USER="admin"
 DEFAULT_PASS="123456"
 
-# --- 路径 ---
+# --- 路径变量 ---
 REALM_BIN="/usr/local/bin/realm"
-REALM_CONFIG="/etc/realm/config.toml"
-WORK_DIR="/opt/realm_panel"
-BINARY_PATH="/usr/local/bin/realm-panel"
-DATA_FILE="/etc/realm/panel_data.json"
+CONFIG_FILE="/etc/realm/config.toml"
+SERVICE_FILE="/etc/systemd/system/realm.service"
+TMP_DIR="/tmp/realm_install"
 
-# --- 颜色与动画 ---
+# 面板相关路径
+WORK_DIR="/opt/realm_panel"
+PANEL_BIN="/usr/local/bin/realm-panel"
+PANEL_DATA="/etc/realm/panel_data.json"
+
+# --- 颜色定义 ---
 GREEN="\033[32m"
 RED="\033[31m"
 YELLOW="\033[33m"
 CYAN="\033[36m"
 RESET="\033[0m"
+
+# --- 辅助函数 ---
+need_cmd() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo -e "${RED}错误: 缺少必要命令 '$1'，请先安装它。${RESET}"
+        exit 1
+    fi
+}
 
 spinner() {
     local pid=$1
@@ -41,6 +52,135 @@ run_step() {
     echo -e "${GREEN} [完成]${RESET}"
 }
 
+# --- Realm 安装逻辑 (完全保留你的要求) ---
+
+get_arch() {
+    case "$(uname -m)" in
+        x86_64) echo "x86_64" ;;
+        aarch64) echo "aarch64" ;;
+        *) echo "unsupported" ;;
+    esac
+}
+
+get_libc() {
+    if ldd --version 2>&1 | grep -q 'musl'; then
+        echo "musl"
+    else
+        echo "gnu"
+    fi
+}
+
+get_realm_filename() {
+    local arch libc
+    arch="$(get_arch)"
+    libc="$(get_libc)"
+    if [ "$arch" = "unsupported" ]; then
+        return 1
+    fi
+    echo "realm-${arch}-unknown-linux-${libc}.tar.gz"
+}
+
+get_latest_realm_url() {
+    local file
+    file="$(get_realm_filename)"
+    [ -z "$file" ] && return 1
+
+    # 尝试获取下载链接
+    curl -s https://api.github.com/repos/zhboner/realm/releases/latest \
+        | grep browser_download_url \
+        | grep "$file" \
+        | cut -d '"' -f 4
+}
+
+ensure_config_file() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        mkdir -p "$(dirname "$CONFIG_FILE")"
+        touch "$CONFIG_FILE"
+        # 写入一个初始的空配置，防止 realm 启动报错
+        echo '[[endpoints]]' > "$CONFIG_FILE"
+        echo 'listen = "127.0.0.1:65534"' >> "$CONFIG_FILE"
+        echo 'remote = "127.0.0.1:65534"' >> "$CONFIG_FILE"
+    fi
+}
+
+install_realm_inner() {
+    need_cmd curl
+    need_cmd tar
+    need_cmd systemctl
+
+    echo -e "${GREEN}正在获取 Realm 最新版本信息...${RESET}"
+
+    local arch libc file url
+    arch="$(get_arch)"
+    libc="$(get_libc)"
+    file="$(get_realm_filename)"
+
+    if [ "$arch" = "unsupported" ] || [ -z "$file" ]; then
+        echo -e "${RED}不支持的架构：$(uname -m)${RESET}"
+        exit 1
+    fi
+
+    url="$(get_latest_realm_url || true)"
+    if [ -z "$url" ]; then
+        echo -e "${RED}获取 Realm 最新版本下载地址失败 (可能是 GitHub API 限制，请稍后再试)。${RESET}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}检测到架构：$arch  libc：$libc${RESET}"
+    echo -e "${GREEN}下载地址：$url${RESET}"
+
+    mkdir -p "$TMP_DIR"
+    cd "$TMP_DIR" || exit 1
+    rm -f realm.tar.gz realm
+
+    if ! curl -L -o realm.tar.gz "$url"; then
+        echo -e "${RED}下载失败。${RESET}"
+        exit 1
+    fi
+    
+    tar -xzf realm.tar.gz
+
+    if [ ! -f "realm" ]; then
+        echo -e "${RED}解压后未找到 realm 可执行文件。${RESET}"
+        exit 1
+    fi
+
+    # 停止旧服务（如果存在）
+    systemctl stop realm >/dev/null 2>&1
+
+    mv realm "$REALM_BIN"
+    chmod +x "$REALM_BIN"
+
+    # 配置 Realm 服务 (包含 LimitNOFILE 优化)
+    cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=Realm Proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=$REALM_BIN -c $CONFIG_FILE
+Restart=always
+# 增加文件描述符限制，防止高并发断流
+LimitNOFILE=1048576
+LimitNPROC=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    ensure_config_file
+    systemctl daemon-reload
+    systemctl enable realm >/dev/null 2>&1 || true
+    systemctl restart realm
+
+    echo -e "${GREEN}Realm 主程序安装完成。${RESET}"
+    cd ~
+    rm -rf "$TMP_DIR"
+}
+
+# --- 主流程开始 ---
+
 if [ "$EUID" -ne 0 ]; then
     echo -e "${RED}请以 root 用户运行！${RESET}"
     exit 1
@@ -48,24 +188,25 @@ fi
 
 clear
 echo -e "${GREEN}==========================================${RESET}"
-echo -e "${GREEN}Realm 面板 一键部署  ${RESET}"
+echo -e "${GREEN}             Realm 面板一键部署            ${RESET}"
 echo -e "${GREEN}==========================================${RESET}"
 
-# 1. 环境准备 (自动适配架构依赖)
+# 1. 环境准备
 OS_ARCH=$(uname -m)
 if [ -f /etc/debian_version ]; then
-    run_step "更新系统软件源" "apt-get update -y"
-    # ARM 架构通常不需要 gcc-multilib，且安装可能报错，这里做区分
+    run_step "更新软件源" "apt-get update -y"
+    # ARM 架构兼容性处理
     if [[ "$OS_ARCH" == "x86_64" ]]; then
-        run_step "安装系统基础依赖" "apt-get install -y curl wget tar build-essential pkg-config libssl-dev gcc-multilib"
+        run_step "安装基础依赖" "apt-get install -y curl wget tar build-essential pkg-config libssl-dev gcc-multilib"
     else
-        run_step "安装系统基础依赖" "apt-get install -y curl wget tar build-essential pkg-config libssl-dev"
+        run_step "安装基础依赖" "apt-get install -y curl wget tar build-essential pkg-config libssl-dev"
     fi
 elif [ -f /etc/redhat-release ]; then
-    run_step "安装开发工具包" "yum groupinstall -y 'Development Tools'"
+    run_step "安装开发工具" "yum groupinstall -y 'Development Tools'"
     run_step "安装基础依赖" "yum install -y curl wget tar openssl-devel libgcc glibc-static"
 fi
 
+# 安装 Rust
 if ! command -v cargo &> /dev/null; then
     echo -e -n "${CYAN}>>> 安装 Rust 编译器...${RESET}"
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y >/dev/null 2>&1 &
@@ -74,32 +215,12 @@ if ! command -v cargo &> /dev/null; then
     source "$HOME/.cargo/env"
 fi
 
-# 2. Realm 主程序
-if [ ! -f "$REALM_BIN" ]; then
-    echo -e -n "${CYAN}>>> 下载并安装 Realm 主程序...${RESET}"
-    if [[ "$OS_ARCH" == "x86_64" ]]; then
-        URL="https://github.com/zhboner/realm/releases/latest/download/realm-x86_64-unknown-linux-gnu.tar.gz"
-    elif [[ "$OS_ARCH" == "aarch64" ]]; then
-        URL="https://github.com/zhboner/realm/releases/latest/download/realm-aarch64-unknown-linux-gnu.tar.gz"
-    else
-        echo -e "${RED}不支持架构: $OS_ARCH${RESET}"
-        exit 1
-    fi
-    mkdir -p /tmp/realm_tmp
-    (
-        wget -O /tmp/realm_tmp/realm.tar.gz "$URL" -q
-        tar -xvf /tmp/realm_tmp/realm.tar.gz -C /tmp/realm_tmp
-        mv /tmp/realm_tmp/realm "$REALM_BIN"
-        chmod +x "$REALM_BIN"
-    ) >/dev/null 2>&1 &
-    spinner $!
-    rm -rf /tmp/realm_tmp
-    echo -e "${GREEN} [完成]${RESET}"
-fi
-mkdir -p "$(dirname "$REALM_CONFIG")"
+# 2. 安装 Realm 主程序 
+install_realm_inner
 
-# 3. 生成代码
-run_step "生成 Rust 源代码" "
+# 3. 生成面板代码
+mkdir -p "$(dirname "$PANEL_DATA")"
+run_step "生成面板源代码" "
 rm -rf '$WORK_DIR'
 mkdir -p '$WORK_DIR/src'
 "
@@ -108,7 +229,7 @@ cd "$WORK_DIR"
 cat > Cargo.toml <<EOF
 [package]
 name = "realm-panel"
-version = "3.4.7"
+version = "3.4.8"
 edition = "2021"
 
 [dependencies]
@@ -122,6 +243,7 @@ anyhow = "1.0"
 uuid = { version = "1", features = ["v4"] }
 EOF
 
+# --- 核心 Rust 代码 ---
 cat > src/main.rs << 'EOF'
 use axum::{
     extract::{State, Path},
@@ -205,6 +327,7 @@ async fn main() {
         .with_state(state);
 
     let port = std::env::var("PANEL_PORT").unwrap_or_else(|_| "4794".to_string());
+    // 监听 0.0.0.0 以便外部访问
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
@@ -234,15 +357,15 @@ fn load_or_init_data() -> AppData {
         if let Ok(content) = fs::read_to_string(REALM_CONFIG) {
             if let Ok(toml_val) = content.parse::<toml::Value>() {
                  if let Some(endpoints) = toml_val.get("endpoints").and_then(|v| v.as_array()) {
-                     for ep in endpoints {
-                         let name = ep.get("name").and_then(|v| v.as_str()).unwrap_or("Imported").to_string();
-                         if name == "system-keepalive" { continue; }
-                         let listen = ep.get("listen").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                         let remote = ep.get("remote").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                         if !listen.is_empty() && !remote.is_empty() {
-                             rules.push(Rule { id: uuid::Uuid::new_v4().to_string(), name, listen, remote, enabled: true });
-                         }
-                     }
+                      for ep in endpoints {
+                          let name = ep.get("name").and_then(|v| v.as_str()).unwrap_or("Imported").to_string();
+                          if name == "system-keepalive" { continue; }
+                          let listen = ep.get("listen").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                          let remote = ep.get("remote").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                          if !listen.is_empty() && !remote.is_empty() {
+                              rules.push(Rule { id: uuid::Uuid::new_v4().to_string(), name, listen, remote, enabled: true });
+                          }
+                      }
                  }
             }
         }
@@ -269,6 +392,7 @@ fn save_config_toml(data: &AppData) {
         })
         .collect();
     
+    // 如果没有规则，添加一个保活规则防止 realm 退出
     if endpoints.is_empty() {
         endpoints.push(RealmEndpoint {
             name: "system-keepalive".to_string(),
@@ -281,6 +405,8 @@ fn save_config_toml(data: &AppData) {
     let config = RealmConfig { endpoints };
     let toml_str = toml::to_string(&config).unwrap();
     let _ = fs::write(REALM_CONFIG, toml_str);
+    
+    // 异步重启 Realm 服务，不阻塞 Web 请求
     let _ = Command::new("systemctl").arg("restart").arg("realm").status();
 }
 
@@ -290,6 +416,8 @@ fn check_auth(cookies: &Cookies, state: &AppData) -> bool {
     }
     false
 }
+
+// --- 路由处理函数 ---
 
 async fn index_page(cookies: Cookies, State(state): State<Arc<AppState>>) -> Response {
     let data = state.data.lock().unwrap();
@@ -360,10 +488,12 @@ async fn batch_add_rules(cookies: Cookies, State(state): State<Arc<AppState>>, J
     for req in reqs {
         let new_port = req.listen.split(':').last().unwrap_or("").trim();
         if new_port.is_empty() { continue; }
+        // 简单去重：检查现有规则中是否有该端口
         if data.rules.iter().any(|r| r.listen.split(':').last().unwrap_or("").trim() == new_port) { continue; }
         data.rules.push(Rule { id: uuid::Uuid::new_v4().to_string(), name: req.name, listen: req.listen, remote: req.remote, enabled: true });
         added_count += 1;
     }
+    // 只有在确实添加了规则时才保存和重启，提高批量性能
     if added_count > 0 { save_json(&data); save_config_toml(&data); }
     Json(serde_json::json!({"status":"ok", "message": format!("成功添加 {} 条规则", added_count)})).into_response()
 }
@@ -421,6 +551,7 @@ async fn update_rule(cookies: Cookies, State(state): State<Arc<AppState>>, Path(
     let mut data = state.data.lock().unwrap();
     if !check_auth(&cookies, &data) { return StatusCode::UNAUTHORIZED.into_response(); }
     let new_port = req.listen.split(':').last().unwrap_or("").trim();
+    // 检查端口冲突（排除自身）
     if data.rules.iter().any(|r| r.id != id && r.listen.split(':').last().unwrap_or("").trim() == new_port) {
         return Json(serde_json::json!({"status":"error", "message": "端口已被占用！"})).into_response();
     }
@@ -444,6 +575,7 @@ async fn update_bg(cookies: Cookies, State(state): State<Arc<AppState>>, Json(re
     data.admin.bg_pc = req.bg_pc; data.admin.bg_mobile = req.bg_mobile; save_json(&data);
     Json(serde_json::json!({"status":"ok"})).into_response()
 }
+
 
 const LOGIN_HTML: &str = r#"
 <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"><title>Realm Login</title><style>*{margin:0;padding:0;box-sizing:border-box}body{height:100vh;width:100vw;overflow:hidden;display:flex;justify-content:center;align-items:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:url('{{BG_PC}}') no-repeat center center/cover;color:#374151}@media(max-width:768px){body{background-image:url('{{BG_MOBILE}}')}}.overlay{position:absolute;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.05)}.box{position:relative;z-index:2;background:rgba(255,255,255,0.3);backdrop-filter:blur(25px);-webkit-backdrop-filter:blur(25px);padding:2.5rem;border-radius:24px;border:1px solid rgba(255,255,255,0.4);box-shadow:0 8px 32px rgba(0,0,0,0.05);width:90%;max-width:380px;text-align:center}h2{margin-bottom:2rem;color:#374151;font-weight:600;letter-spacing:1px}input{width:100%;padding:14px;margin-bottom:1.2rem;border:1px solid rgba(255,255,255,0.5);border-radius:12px;outline:none;background:rgba(255,255,255,0.5);transition:0.3s;color:#374151}input:focus{background:rgba(255,255,255,0.9);border-color:#3b82f6}button{width:100%;padding:14px;background:rgba(59,130,246,0.85);color:white;border:none;border-radius:12px;cursor:pointer;font-weight:600;font-size:1rem;transition:0.3s;backdrop-filter:blur(5px)}button:hover{background:#2563eb;transform:translateY(-1px)}</style></head><body><div class="overlay"></div><div class="box"><h2>Realm Panel</h2><form onsubmit="doLogin(event)"><input type="text" id="u" placeholder="Username" required><input type="password" id="p" placeholder="Password" required><button type="submit" id="btn">登 录</button></form></div><script>async function doLogin(e){e.preventDefault();const b=document.getElementById('btn');b.innerText='登录中...';b.disabled=true;const res=await fetch('/login',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`username=${encodeURIComponent(document.getElementById('u').value)}&password=${encodeURIComponent(document.getElementById('p').value)}`});if(res.redirected){location.href=res.url}else if(res.ok){location.href='/'}else{alert('用户名或密码错误');b.innerText='登 录';b.disabled=false}}</script></body></html>
@@ -498,7 +630,7 @@ load();window.addEventListener('resize',render);</script></body></html>
 "#;
 EOF
 
-# 4. 编译安装
+# 4. 编译面板
 echo -e -n "${CYAN}>>> 编译面板程序 (请耐心等待！)...${RESET}"
 OS_ARCH=$(uname -m)
 if [[ "$OS_ARCH" == "aarch64" ]]; then
@@ -520,8 +652,8 @@ spinner $!
 
 if [ -f "target/release/realm-panel" ]; then
     echo -e "${GREEN} [完成]${RESET}"
-    echo -e -n "${CYAN}>>> 正在部署服务...${RESET}"
-    mv target/release/realm-panel "$BINARY_PATH"
+    echo -e -n "${CYAN}>>> 正在部署面板服务...${RESET}"
+    mv target/release/realm-panel "$PANEL_BIN"
 else
     echo -e "${RED} [失败]${RESET}"
     echo -e "${RED}编译出错，请手动运行 cargo build --release 查看详情。${RESET}"
@@ -530,6 +662,7 @@ fi
 
 rm -rf "$WORK_DIR"
 
+# 5. 配置面板服务
 cat > /etc/systemd/system/realm-panel.service <<EOF
 [Unit]
 Description=Realm Panel Custom
@@ -540,7 +673,9 @@ User=root
 Environment="PANEL_USER=$DEFAULT_USER"
 Environment="PANEL_PASS=$DEFAULT_PASS"
 Environment="PANEL_PORT=$PANEL_PORT"
-ExecStart=$BINARY_PATH
+LimitNOFILE=1048576
+LimitNPROC=1048576
+ExecStart=$PANEL_BIN
 Restart=always
 
 [Install]
@@ -548,8 +683,6 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable realm >/dev/null 2>&1
-systemctl start realm >/dev/null 2>&1
 systemctl enable realm-panel >/dev/null 2>&1
 systemctl restart realm-panel >/dev/null 2>&1
 echo -e "${GREEN} [完成]${RESET}"
@@ -557,7 +690,7 @@ echo -e "${GREEN} [完成]${RESET}"
 IP=$(curl -s4 ifconfig.me || hostname -I | awk '{print $1}')
 echo -e ""
 echo -e "${GREEN}==========================================${RESET}"
-echo -e "${GREEN}✅ Realm 转发面板部署成功！${RESET}"
+echo -e "${GREEN}✅ Realm 面板部署成功 (${RESET}"
 echo -e "${GREEN}==========================================${RESET}"
 echo -e "访问地址 : ${YELLOW}http://${IP}:${PANEL_PORT}${RESET}"
 echo -e "默认用户 : ${YELLOW}${DEFAULT_USER}${RESET}"
