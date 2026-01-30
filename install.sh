@@ -177,7 +177,7 @@ install_realm_inner() {
 
   echo -e "${GREEN}正在安装 Realm ...${RESET}"
 
-  # --- 修改点 2：执行系统级内核优化 ---
+
   echo -e "${YELLOW}正在执行系统内核 LimitNOFILE 优化...${RESET}"
   if [ ! -f "/etc/sysctl.d/99-realm.conf" ]; then
       cat > /etc/sysctl.d/99-realm.conf <<EOF
@@ -191,7 +191,7 @@ net.ipv4.tcp_fastopen = 3
 EOF
       sysctl -p /etc/sysctl.d/99-realm.conf >/dev/null 2>&1 || true
   fi
-  # 临时生效
+
   ulimit -n 1000000 >/dev/null 2>&1 || true
   # ----------------------------------
 
@@ -229,7 +229,6 @@ EOF
   mv realm "$REALM_BIN"
   chmod +x "$REALM_BIN"
 
-  # --- 修改点 3：优化 Service 配置 (加入 LimitNPROC) ---
   cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Realm Proxy
@@ -726,8 +725,8 @@ import_rules() {
 
   echo -e "${GREEN}导入文件规则数：$(grep -c -E '^[[:space:]]*(#\s*)?\[\[endpoints\]\]' "$IN")${RESET}"
   echo "导入模式："
-  echo "1. 覆盖（清空现有规则后导入）"
-  echo "2. 追加（在现有规则后追加导入）"
+  echo "1. 覆盖"
+  echo "2. 追加"
   read -p "请选择 [1-2]: " MODE
 
   case "$MODE" in
