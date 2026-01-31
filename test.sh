@@ -928,11 +928,36 @@ else
 fi
 
 mkdir -p .cargo
+
+LD_FLAG=""
+if command -v ld.lld >/dev/null 2>&1; then
+    LD_FLAG="-fuse-ld=lld"
+elif command -v lld >/dev/null 2>&1; then
+    LD_FLAG="-fuse-ld=lld"
+elif command -v ld.gold >/dev/null 2>&1; then
+    LD_FLAG="-fuse-ld=gold"
+else
+    if gcc -Wl,-fuse-ld=bfd -x c - -o /tmp/.ldtest.$$ >/dev/null 2>&1 <<<'int main(){}'; then
+        LD_FLAG="-fuse-ld=bfd"
+        rm -f /tmp/.ldtest.$$ >/dev/null 2>&1 || true
+    else
+        LD_FLAG=""
+    fi
+fi
+
+if [ -n "$LD_FLAG" ]; then
 cat > .cargo/config.toml <<EOF
 [target.$RUST_TRIPLE]
 linker = "gcc"
-rustflags = ["-C", "link-arg=-fuse-ld=bfd"]
+rustflags = ["-C", "link-arg=$LD_FLAG"]
 EOF
+else
+cat > .cargo/config.toml <<EOF
+[target.$RUST_TRIPLE]
+linker = "gcc"
+EOF
+fi
+
 
 # 编译并检查
 cargo clean >/dev/null 2>&1
