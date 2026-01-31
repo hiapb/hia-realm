@@ -23,7 +23,7 @@ CYAN="\033[36m"
 RESET="\033[0m"
 # =========================================
 
-# 自定义链名称 (核心修正：使用自定义链防止污染主链)
+# 自定义链名称
 CHAIN_IN="REALM_IN"
 CHAIN_OUT="REALM_OUT"
 
@@ -76,15 +76,19 @@ prepare_env_and_fix_compilation() {
     echo -e "${CYAN}>>> 正在优化编译环境...${RESET}"
     OS_ARCH=$(uname -m)
     if [ -f /etc/debian_version ]; then
+        export DEBIAN_FRONTEND=noninteractive
         apt-get update -y >/dev/null 2>&1
-        apt-get install -y curl wget tar git build-essential pkg-config libssl-dev iptables >/dev/null 2>&1
-        apt-get install --reinstall -y gcc gcc-10 libgcc-10-dev libgcc-s1 libc6-dev >/dev/null 2>&1
+        apt-get install -y ca-certificates curl wget tar git build-essential pkg-config libssl-dev iptables >/dev/null 2>&1
+        if ! command -v gcc >/dev/null 2>&1; then apt-get install -y gcc >/dev/null 2>&1; fi
+        update-ca-certificates >/dev/null 2>&1 || true
+
     elif [ -f /etc/redhat-release ]; then
-        yum groupinstall -y 'Development Tools' >/dev/null 2>&1
-        yum install -y curl wget tar openssl-devel libgcc glibc-static iptables-services >/dev/null 2>&1
+        if command -v dnf >/dev/null 2>&1; then PKG=dnf; else PKG=yum; fi
+        $PKG -y groupinstall "Development Tools" >/dev/null 2>&1 || true
+        $PKG -y install ca-certificates curl wget tar git gcc gcc-c++ make pkgconfig openssl-devel iptables iptables-services glibc-static >/dev/null 2>&1 || true
     fi
 
-    if ! command -v cargo &> /dev/null; then
+    if ! command -v cargo >/dev/null 2>&1; then
         echo -e -n "${CYAN}>>> 安装 Rust 编译器...${RESET}"
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y >/dev/null 2>&1 &
         spinner $!
@@ -92,6 +96,7 @@ prepare_env_and_fix_compilation() {
         echo -e "${GREEN} [完成]${RESET}"
     else
         echo -e "${GREEN}>>> Rust 已安装${RESET}"
+        if [ -f "$HOME/.cargo/env" ]; then source "$HOME/.cargo/env"; fi
     fi
 }
 
@@ -119,10 +124,7 @@ get_latest_realm_url() {
     local file
     file="$(get_realm_filename)"
     [ -z "$file" ] && return 1
-    curl -s https://api.github.com/repos/zhboner/realm/releases/latest \
-        | grep browser_download_url \
-        | grep "$file" \
-        | cut -d '"' -f 4
+    curl -s https://api.github.com/repos/zhboner/realm/releases/latest | grep browser_download_url | grep "$file" | cut -d '"' -f 4
 }
 
 ensure_config_file() {
@@ -154,7 +156,6 @@ install_realm_smart() {
         echo -e "${GREEN}本地 Realm 已是最新版 ($local_ver)，跳过安装${RESET}"
         ensure_config_file
         if [ -f "$SERVICE_FILE" ]; then return 0; fi
-        echo -e "${YELLOW}服务配置丢失，正在修复...${RESET}"
     else
         echo -e "${YELLOW}发现新版本: $latest_ver (当前: $local_ver)，准备更新...${RESET}"
     fi
@@ -208,9 +209,9 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 clear
-echo -e "${GREEN}=============================== ===${RESET}"
+echo -e "${GREEN}==================================${RESET}"
 echo -e "${GREEN}          Realm 面板 一键部署        ${RESET}"
-echo -e "${GREEN}===================================${RESET}"
+echo -e "${GREEN}==================================${RESET}"
 
 prepare_env_and_fix_compilation
 install_realm_smart
@@ -225,7 +226,7 @@ cd "$WORK_DIR"
 cat > Cargo.toml <<EOF
 [package]
 name = "realm-panel"
-version = "3.9.0"
+version = "3.9.2"
 edition = "2021"
 
 [dependencies]
@@ -370,7 +371,6 @@ async fn main() {
 }
 
 fn init_firewall_chains() {
-    // 创建自定义链
     let _ = Command::new("iptables").args(["-N", CHAIN_IN]).status();
     let _ = Command::new("iptables").args(["-N", CHAIN_OUT]).status();
 
@@ -383,6 +383,11 @@ fn init_firewall_chains() {
     if check_out.is_err() || !check_out.unwrap().success() {
         let _ = Command::new("iptables").args(["-I", "OUTPUT", "-j", CHAIN_OUT]).status();
     }
+    
+    let check_fwd = Command::new("iptables").args(["-C", "FORWARD", "-j", CHAIN_OUT]).status();
+    if check_fwd.is_err() || !check_fwd.unwrap().success() {
+        let _ = Command::new("iptables").args(["-I", "FORWARD", "-j", CHAIN_OUT]).status();
+    }
 }
 
 fn flush_realm_chains() {
@@ -394,7 +399,6 @@ fn get_port(listen: &str) -> String {
     listen.split(':').last().unwrap_or("").trim().to_string()
 }
 
-
 fn add_iptables_rule(rule: &Rule) {
     let port = get_port(&rule.listen);
     if port.is_empty() { return; }
@@ -404,10 +408,27 @@ fn add_iptables_rule(rule: &Rule) {
         if check_in.is_err() || !check_in.unwrap().success() {
             let _ = Command::new("iptables").args(["-A", CHAIN_IN, "-p", proto, "--dport", &port, "-j", "RETURN"]).status();
         }
+
+        let check_out = Command::new("iptables").args([
+            "-C", CHAIN_OUT, 
+            "-p", proto, 
+            "-m", "conntrack", 
+            "--ctstate", "ESTABLISHED", 
+            "--ctdir", "REPLY", 
+            "--ctreplsrcport", &port, 
+            "-j", "RETURN"
+        ]).status();
         
-        let check_out = Command::new("iptables").args(["-C", CHAIN_OUT, "-p", proto, "--sport", &port, "-j", "RETURN"]).status();
         if check_out.is_err() || !check_out.unwrap().success() {
-            let _ = Command::new("iptables").args(["-A", CHAIN_OUT, "-p", proto, "--sport", &port, "-j", "RETURN"]).status();
+            let _ = Command::new("iptables").args([
+                "-A", CHAIN_OUT, 
+                "-p", proto, 
+                "-m", "conntrack", 
+                "--ctstate", "ESTABLISHED", 
+                "--ctdir", "REPLY", 
+                "--ctreplsrcport", &port, 
+                "-j", "RETURN"
+            ]).status();
         }
     }
 }
@@ -422,7 +443,15 @@ fn remove_iptables_rule(rule: &Rule) {
             if s.is_err() || !s.unwrap().success() { break; }
         }
         loop {
-            let s = Command::new("iptables").args(["-D", CHAIN_OUT, "-p", proto, "--sport", &port, "-j", "RETURN"]).status();
+            let s = Command::new("iptables").args([
+                "-D", CHAIN_OUT, 
+                "-p", proto, 
+                "-m", "conntrack", 
+                "--ctstate", "ESTABLISHED", 
+                "--ctdir", "REPLY", 
+                "--ctreplsrcport", &port, 
+                "-j", "RETURN"
+            ]).status();
             if s.is_err() || !s.unwrap().success() { break; }
         }
     }
@@ -452,7 +481,8 @@ fn fetch_iptables_counters() -> HashMap<String, TrafficStats> {
 
         if !is_in && !is_out { continue; }
 
-        let port_flag = if is_in { "--dport" } else { "--sport" };
+        let port_flag = if is_in { "--dport" } else { "--ctreplsrcport" };
+        
         if let Some(pos) = line.find(port_flag) {
             let rest = &line[pos + port_flag.len()..];
             let port = rest.split_whitespace().next().unwrap_or("");
@@ -485,11 +515,9 @@ fn update_traffic_and_check(state: &Arc<AppState>) {
         let curr = *current_counters.get(&port).unwrap_or(&TrafficStats{in_bytes:0, out_bytes:0});
         let last = *last_map.get(&port).unwrap_or(&TrafficStats{in_bytes:0, out_bytes:0});
 
-        // 增量计算 (处理 iptables 重置或溢出的情况)
         let delta_in = if curr.in_bytes >= last.in_bytes { curr.in_bytes - last.in_bytes } else { curr.in_bytes };
         let delta_out = if curr.out_bytes >= last.out_bytes { curr.out_bytes - last.out_bytes } else { curr.out_bytes };
 
-        // 计费核心：Max(In, Out)
         let usage_inc = cmp::max(delta_in, delta_out);
 
         if usage_inc > 0 {
@@ -520,8 +548,6 @@ fn update_traffic_and_check(state: &Arc<AppState>) {
         save_config_toml(&data);
     }
 }
-
-// --------------------------------------------------------
 
 fn load_or_init_data() -> AppData {
     if let Ok(content) = fs::read_to_string(DATA_FILE) {
@@ -718,11 +744,24 @@ async fn toggle_rule(cookies: Cookies, State(state): State<Arc<AppState>>, Path(
 
 async fn reset_traffic(cookies: Cookies, State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let mut data = state.data.lock().unwrap();
+    let mut last_map = state.last_traffic_map.lock().unwrap();
+
     if !check_auth(&cookies, &data) { return StatusCode::UNAUTHORIZED.into_response(); }
+    
     if let Some(rule) = data.rules.iter_mut().find(|r| r.id == id) { 
+        let port = get_port(&rule.listen);
         rule.traffic_used = 0;
         rule.status_msg = String::new(); 
-        if rule.enabled { add_iptables_rule(rule); }
+
+        if rule.enabled {
+             remove_iptables_rule(rule);
+             add_iptables_rule(rule);
+        }
+
+        if !port.is_empty() {
+            last_map.remove(&port);
+        }
+        
         save_json(&data); 
     }
     Json(serde_json::json!({"status":"ok"})).into_response()
@@ -880,7 +919,7 @@ load();window.addEventListener('resize',render);
 "#;
 EOF
 
-echo -e -n "${CYAN}>>> 编译面板程序 (这可能需要几分钟)...${RESET}"
+echo -e -n "${CYAN}>>> 编译面板程序 (请耐心等待！)...${RESET}"
 OS_ARCH=$(uname -m)
 if [[ "$OS_ARCH" == "aarch64" ]]; then
     RUST_TRIPLE="aarch64-unknown-linux-gnu"
@@ -889,11 +928,36 @@ else
 fi
 
 mkdir -p .cargo
+
+LD_FLAG=""
+if command -v ld.lld >/dev/null 2>&1; then
+    LD_FLAG="-fuse-ld=lld"
+elif command -v lld >/dev/null 2>&1; then
+    LD_FLAG="-fuse-ld=lld"
+elif command -v ld.gold >/dev/null 2>&1; then
+    LD_FLAG="-fuse-ld=gold"
+else
+    if gcc -Wl,-fuse-ld=bfd -x c - -o /tmp/.ldtest.$$ >/dev/null 2>&1 <<<'int main(){}'; then
+        LD_FLAG="-fuse-ld=bfd"
+        rm -f /tmp/.ldtest.$$ >/dev/null 2>&1 || true
+    else
+        LD_FLAG=""
+    fi
+fi
+
+if [ -n "$LD_FLAG" ]; then
 cat > .cargo/config.toml <<EOF
 [target.$RUST_TRIPLE]
 linker = "gcc"
-rustflags = ["-C", "link-arg=-fuse-ld=bfd"]
+rustflags = ["-C", "link-arg=$LD_FLAG"]
 EOF
+else
+cat > .cargo/config.toml <<EOF
+[target.$RUST_TRIPLE]
+linker = "gcc"
+EOF
+fi
+
 
 # 编译并检查
 cargo clean >/dev/null 2>&1
