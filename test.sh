@@ -76,24 +76,75 @@ prepare_env_and_fix_compilation() {
     echo -e "${CYAN}>>> 正在优化编译环境...${RESET}"
     OS_ARCH=$(uname -m)
     if [ -f /etc/debian_version ]; then
+        export DEBIAN_FRONTEND=noninteractive
+
         apt-get update -y >/dev/null 2>&1
-        apt-get install -y curl wget tar git build-essential pkg-config libssl-dev iptables >/dev/null 2>&1
-        apt-get install --reinstall -y gcc gcc-10 libgcc-10-dev libgcc-s1 libc6-dev >/dev/null 2>&1
+
+        apt-get install -y \
+            ca-certificates curl wget tar git \
+            build-essential pkg-config libssl-dev \
+            iptables >/dev/null 2>&1
+
+        if ! command -v gcc >/dev/null 2>&1; then
+            apt-get install -y gcc >/dev/null 2>&1
+        fi
+
+        if ! command -v ld >/dev/null 2>&1; then
+            apt-get install -y binutils >/dev/null 2>&1
+        fi
+
+        update-ca-certificates >/dev/null 2>&1 || true
+
     elif [ -f /etc/redhat-release ]; then
-        yum groupinstall -y 'Development Tools' >/dev/null 2>&1
-        yum install -y curl wget tar openssl-devel libgcc glibc-static iptables-services >/dev/null 2>&1
+        if command -v dnf >/dev/null 2>&1; then
+            PKG=dnf
+        else
+            PKG=yum
+        fi
+
+        $PKG -y makecache >/dev/null 2>&1 || true
+
+        $PKG -y groupinstall "Development Tools" >/dev/null 2>&1 || true
+
+        $PKG -y install \
+            ca-certificates curl wget tar git \
+            gcc gcc-c++ make pkgconfig \
+            openssl-devel \
+            iptables iptables-services \
+            glibc-static >/dev/null 2>&1 || true
+
+        update-ca-trust >/dev/null 2>&1 || true
+    else
+        echo -e "${YELLOW}警告: 未识别的发行版，跳过系统依赖安装，请自行确保 gcc/make/openssl-dev/iptables 已安装${RESET}"
     fi
 
-    if ! command -v cargo &> /dev/null; then
+    if ! command -v cargo >/dev/null 2>&1; then
         echo -e -n "${CYAN}>>> 安装 Rust 编译器...${RESET}"
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y >/dev/null 2>&1 &
         spinner $!
-        source "$HOME/.cargo/env"
+
+        # 让当前 shell 立刻拿到 cargo/rustc
+        if [ -f "$HOME/.cargo/env" ]; then
+            # shellcheck disable=SC1090
+            source "$HOME/.cargo/env"
+        fi
+
         echo -e "${GREEN} [完成]${RESET}"
     else
         echo -e "${GREEN}>>> Rust 已安装${RESET}"
+        if [ -f "$HOME/.cargo/env" ]; then
+            # shellcheck disable=SC1090
+            source "$HOME/.cargo/env"
+        fi
     fi
+    for c in curl tar git gcc make pkg-config; do
+        if ! command -v "$c" >/dev/null 2>&1; then
+            echo -e "${RED}错误: 关键命令缺失: $c（请检查系统源或网络）${RESET}"
+            exit 1
+        fi
+    done
 }
+
 
 get_realm_filename() {
     local arch libc
