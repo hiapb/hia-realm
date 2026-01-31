@@ -235,17 +235,59 @@ install_realm() {
   fi
 }
 
+cleanup_realm_firewall() {
+  echo -e "${YELLOW}>>> 正在彻底清理防火墙残留...${RESET}"
+
+  for BIN in iptables iptables-nft iptables-legacy; do
+    command -v "$BIN" >/dev/null 2>&1 || continue
+
+    "$BIN" -D INPUT   -j REALM_IN  2>/dev/null || true
+    "$BIN" -D OUTPUT  -j REALM_OUT 2>/dev/null || true
+    "$BIN" -D FORWARD -j REALM_OUT 2>/dev/null || true
+
+    "$BIN" -F REALM_IN  2>/dev/null || true
+    "$BIN" -F REALM_OUT 2>/dev/null || true
+    "$BIN" -X REALM_IN  2>/dev/null || true
+    "$BIN" -X REALM_OUT 2>/dev/null || true
+  done
+
+  for BIN in ip6tables ip6tables-nft ip6tables-legacy; do
+    command -v "$BIN" >/dev/null 2>&1 || continue
+
+    "$BIN" -D INPUT   -j REALM_IN  2>/dev/null || true
+    "$BIN" -D OUTPUT  -j REALM_OUT 2>/dev/null || true
+    "$BIN" -D FORWARD -j REALM_OUT 2>/dev/null || true
+
+    "$BIN" -F REALM_IN  2>/dev/null || true
+    "$BIN" -F REALM_OUT 2>/dev/null || true
+    "$BIN" -X REALM_IN  2>/dev/null || true
+    "$BIN" -X REALM_OUT 2>/dev/null || true
+  done
+
+  echo -e "${GREEN}>>> 防火墙残留清理完成${RESET}"
+}
+
 uninstall_realm() {
   echo -e "${YELLOW}开始卸载 Realm 面板...${RESET}"
-  bash <(curl -fsSL https://raw.githubusercontent.com/hiapb/hia-realm/main/unipan.sh)
+  bash <(curl -fsSL https://raw.githubusercontent.com/hiapb/hia-realm/main/unipan.sh) || true
+
+  cleanup_realm_firewall
+
   echo -e "${YELLOW}开始卸载 Realm 主程序...${RESET}"
   systemctl stop realm >/dev/null 2>&1 || true
   systemctl disable realm >/dev/null 2>&1 || true
+
   rm -f "$REALM_BIN" "$SERVICE_FILE" "$CONFIG_FILE"
   rm -f /etc/sysctl.d/99-realm.conf
-  systemctl daemon-reexec
+
+  rm -f /etc/realm/panel_data.json 2>/dev/null || true
+
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl daemon-reexec >/dev/null 2>&1 || true
+
   echo -e "${GREEN}Realm 及面板已全部卸载完成。${RESET}"
 }
+
 
 RULE_STARTS=()
 RULE_ENDS=()
