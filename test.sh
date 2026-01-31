@@ -77,74 +77,28 @@ prepare_env_and_fix_compilation() {
     OS_ARCH=$(uname -m)
     if [ -f /etc/debian_version ]; then
         export DEBIAN_FRONTEND=noninteractive
-
         apt-get update -y >/dev/null 2>&1
-
-        apt-get install -y \
-            ca-certificates curl wget tar git \
-            build-essential pkg-config libssl-dev \
-            iptables >/dev/null 2>&1
-
-        if ! command -v gcc >/dev/null 2>&1; then
-            apt-get install -y gcc >/dev/null 2>&1
-        fi
-
-        if ! command -v ld >/dev/null 2>&1; then
-            apt-get install -y binutils >/dev/null 2>&1
-        fi
-
+        apt-get install -y ca-certificates curl wget tar git build-essential pkg-config libssl-dev iptables >/dev/null 2>&1
+        if ! command -v gcc >/dev/null 2>&1; then apt-get install -y gcc >/dev/null 2>&1; fi
         update-ca-certificates >/dev/null 2>&1 || true
 
     elif [ -f /etc/redhat-release ]; then
-        if command -v dnf >/dev/null 2>&1; then
-            PKG=dnf
-        else
-            PKG=yum
-        fi
-
-        $PKG -y makecache >/dev/null 2>&1 || true
-
+        if command -v dnf >/dev/null 2>&1; then PKG=dnf; else PKG=yum; fi
         $PKG -y groupinstall "Development Tools" >/dev/null 2>&1 || true
-
-        $PKG -y install \
-            ca-certificates curl wget tar git \
-            gcc gcc-c++ make pkgconfig \
-            openssl-devel \
-            iptables iptables-services \
-            glibc-static >/dev/null 2>&1 || true
-
-        update-ca-trust >/dev/null 2>&1 || true
-    else
-        echo -e "${YELLOW}警告: 未识别的发行版，跳过系统依赖安装，请自行确保 gcc/make/openssl-dev/iptables 已安装${RESET}"
+        $PKG -y install ca-certificates curl wget tar git gcc gcc-c++ make pkgconfig openssl-devel iptables iptables-services glibc-static >/dev/null 2>&1 || true
     fi
 
     if ! command -v cargo >/dev/null 2>&1; then
         echo -e -n "${CYAN}>>> 安装 Rust 编译器...${RESET}"
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y >/dev/null 2>&1 &
         spinner $!
-
-        # 让当前 shell 立刻拿到 cargo/rustc
-        if [ -f "$HOME/.cargo/env" ]; then
-            # shellcheck disable=SC1090
-            source "$HOME/.cargo/env"
-        fi
-
+        source "$HOME/.cargo/env"
         echo -e "${GREEN} [完成]${RESET}"
     else
         echo -e "${GREEN}>>> Rust 已安装${RESET}"
-        if [ -f "$HOME/.cargo/env" ]; then
-            # shellcheck disable=SC1090
-            source "$HOME/.cargo/env"
-        fi
+        if [ -f "$HOME/.cargo/env" ]; then source "$HOME/.cargo/env"; fi
     fi
-    for c in curl tar git gcc make pkg-config; do
-        if ! command -v "$c" >/dev/null 2>&1; then
-            echo -e "${RED}错误: 关键命令缺失: $c（请检查系统源或网络）${RESET}"
-            exit 1
-        fi
-    done
 }
-
 
 get_realm_filename() {
     local arch libc
@@ -170,10 +124,7 @@ get_latest_realm_url() {
     local file
     file="$(get_realm_filename)"
     [ -z "$file" ] && return 1
-    curl -s https://api.github.com/repos/zhboner/realm/releases/latest \
-        | grep browser_download_url \
-        | grep "$file" \
-        | cut -d '"' -f 4
+    curl -s https://api.github.com/repos/zhboner/realm/releases/latest | grep browser_download_url | grep "$file" | cut -d '"' -f 4
 }
 
 ensure_config_file() {
@@ -205,7 +156,6 @@ install_realm_smart() {
         echo -e "${GREEN}本地 Realm 已是最新版 ($local_ver)，跳过安装${RESET}"
         ensure_config_file
         if [ -f "$SERVICE_FILE" ]; then return 0; fi
-        echo -e "${YELLOW}服务配置丢失，正在修复...${RESET}"
     else
         echo -e "${YELLOW}发现新版本: $latest_ver (当前: $local_ver)，准备更新...${RESET}"
     fi
@@ -276,7 +226,7 @@ cd "$WORK_DIR"
 cat > Cargo.toml <<EOF
 [package]
 name = "realm-panel"
-version = "3.9.1"
+version = "3.9.2"
 edition = "2021"
 
 [dependencies]
@@ -493,7 +443,6 @@ fn remove_iptables_rule(rule: &Rule) {
             if s.is_err() || !s.unwrap().success() { break; }
         }
         loop {
-
             let s = Command::new("iptables").args([
                 "-D", CHAIN_OUT, 
                 "-p", proto, 
@@ -599,7 +548,6 @@ fn update_traffic_and_check(state: &Arc<AppState>) {
         save_config_toml(&data);
     }
 }
-
 
 fn load_or_init_data() -> AppData {
     if let Ok(content) = fs::read_to_string(DATA_FILE) {
@@ -794,7 +742,6 @@ async fn toggle_rule(cookies: Cookies, State(state): State<Arc<AppState>>, Path(
     Json(serde_json::json!({"status":"ok"})).into_response()
 }
 
-
 async fn reset_traffic(cookies: Cookies, State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let mut data = state.data.lock().unwrap();
     let mut last_map = state.last_traffic_map.lock().unwrap();
@@ -805,7 +752,12 @@ async fn reset_traffic(cookies: Cookies, State(state): State<Arc<AppState>>, Pat
         let port = get_port(&rule.listen);
         rule.traffic_used = 0;
         rule.status_msg = String::new(); 
-        
+
+        if rule.enabled {
+             remove_iptables_rule(rule);
+             add_iptables_rule(rule);
+        }
+
         if !port.is_empty() {
             last_map.remove(&port);
         }
